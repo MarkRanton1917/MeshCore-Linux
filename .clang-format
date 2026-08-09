@@ -1,0 +1,234 @@
+#clang-format --version is 18.1.3
+
+---
+AccessModifierOffset: -2
+AlignAfterOpenBracket: DontAlign
+AlignArrayOfStructures: None
+AlignConsecutiveAssignments:
+  AcrossComments: false
+  AcrossEmptyLines: false
+  AlignCompound: false
+  AlignFunctionPointers: false
+  Enabled: false
+  PadOperators: true
+AlignConsecutiveBitFields: Consecutive
+AlignConsecutiveDeclarations:
+  AcrossComments: false
+  AcrossEmptyLines: false
+  AlignCompound: false
+  AlignFunctionPointers: false
+  Enabled: false
+  PadOperators: false
+AlignConsecutiveMacros: Consecutive
+AlignConsecutiveShortCaseStatements:
+  AcrossComments: false
+  AcrossEmptyLines: false
+  AlignCaseColons: false
+  Enabled: false
+AlignEscapedNewlines: Left
+AlignOperands: DontAlign
+AlignTrailingComments:
+  Kind: Never
+  OverEmptyLines: 0
+AllowAllArgumentsOnNextLine: true
+AllowAllParametersOfDeclarationOnNextLine: false
+AllowBreakBeforeNoexceptSpecifier: Never
+AllowShortBlocksOnASingleLine: Never
+AllowShortCaseLabelsOnASingleLine: false
+AllowShortCompoundRequirementOnASingleLine: true
+AllowShortEnumsOnASingleLine: false
+AllowShortFunctionsOnASingleLine: None
+AllowShortIfStatementsOnASingleLine: WithoutElse
+AllowShortLambdasOnASingleLine: All
+AllowShortLoopsOnASingleLine: false
+AlwaysBreakAfterDefinitionReturnType: None
+AlwaysBreakAfterReturnType: None
+AlwaysBreakBeforeMultilineStrings: false
+AlwaysBreakTemplateDeclarations: true
+AttributeMacros:
+- __capability
+BinPackArguments: true
+BinPackParameters: false
+BitFieldColonSpacing: Before
+BraceWrapping:
+  AfterCaseLabel: false
+  AfterClass: true
+  AfterControlStatement: Never
+  AfterEnum: true
+  AfterExternBlock: true
+  AfterFunction: true
+  AfterNamespace: false
+  AfterObjCDeclaration: false
+  AfterStruct: true
+  AfterUnion: true
+  BeforeCatch: false
+  BeforeElse: false
+  BeforeLambdaBody: false
+  BeforeWhile: false
+  IndentBraces: false
+  SplitEmptyFunction: true
+  SplitEmptyNamespace: true
+  SplitEmptyRecord: false
+BreakAdjacentStringLiterals: true
+BreakAfterAttributes: Leave
+BreakAfterJavaFieldAnnotations: true
+BreakArrays: true
+BreakBeforeBinaryOperators: NonAssignment
+BreakBeforeBraces: Stroustrup
+BreakBeforeConceptDeclarations: Always
+BreakBeforeInlineASMColon: OnlyMultiline
+BreakBeforeTernaryOperators: 'false'
+BreakConstructorInitializers: BeforeColon
+BreakInheritanceList: AfterColon
+BreakStringLiterals: false
+ColumnLimit: 120
+CommentPragmas: '^ IWYU pragma:'
+CompactNamespaces: 'false'
+ConstructorInitializerIndentWidth: 2
+ContinuationIndentWidth: 2
+Cpp11BracedListStyle: 'false'
+DerivePointerAlignment: 'false'
+DisableFormat: false
+EmptyLineAfterAccessModifier: Never
+EmptyLineBeforeAccessModifier: Leave
+ExperimentalAutoDetectBinPacking: true
+FixNamespaceComments: 'false'
+ForEachMacros:
+- foreach
+- Q_FOREACH
+- BOOST_FOREACH
+IfMacros:
+- KJ_IF_MAYBE
+IncludeBlocks: Merge
+IncludeCategories:
+- CaseSensitive: false
+  Priority: 2
+  Regex: ^"(llvm|llvm-c|clang|clang-c)/
+  SortPriority: 0
+- CaseSensitive: false
+  Priority: 3
+  Regex: ^(<|"(gtest|gmock|isl|json)/)
+  SortPriority: 0
+- CaseSensitive: true
+  Priority: 1
+  Regex: .*
+  SortPriority: 0
+IncludeIsMainRegex: (Test)?$
+IncludeIsMainSourceRegex: ''
+IndentAccessModifiers: 'false'
+IndentCaseBlocks: false
+IndentCaseLabels: false
+IndentExternBlock: Indent
+IndentGotoLabels: true
+IndentPPDirectives: None
+IndentRequiresClause: false
+IndentWidth: 2
+IndentWrappedFunctionNames: true
+InsertBraces: false
+InsertNewlineAtEOF: false
+InsertTrailingCommas: None
+IntegerLiteralSeparator:
+  Binary: 0
+  BinaryMinDigits: 0
+  Decimal: 0
+  DecimalMinDigits: 0
+  Hex: 0
+  HexMinDigits: 0
+JavaScriptQuotes: Leave
+JavaScriptWrapImports: true
+KeepEmptyLinesAtEOF: true
+KeepEmptyLinesAtTheStartOfBlocks: true
+LambdaBodyIndentation: Signature
+Language: Cpp
+LineEnding: DeriveLF
+MacroBlockBegin: ''
+MacroBlockEnd: ''
+MaxEmptyLinesToKeep: 2
+NamespaceIndentation: None
+ObjCBinPackProtocolList: Auto
+ObjCBlockIndentWidth: 0
+ObjCBreakBeforeNestedBlockParam: true
+ObjCSpaceAfterProperty: false
+ObjCSpaceBeforeProtocolList: false
+PPIndentWidth: -1
+PackConstructorInitializers: Never
+PenaltyBreakAssignment: 2
+PenaltyBreakBeforeFirstCallParameter: 100
+PenaltyBreakComment: 290
+PenaltyBreakFirstLessLess: 129
+PenaltyBreakOpenParenthesis: 0
+PenaltyBreakScopeResolution: 500
+PenaltyBreakString: 961
+PenaltyBreakTemplateDeclaration: 10
+PenaltyExcessCharacter: 971650
+PenaltyIndentedWhitespace: 0
+PenaltyReturnTypeOnItsOwnLine: 197
+PointerAlignment: Left
+QualifierAlignment: Leave
+ReferenceAlignment: Pointer
+ReflowComments: true
+RemoveBracesLLVM: false
+RemoveParentheses: Leave
+RemoveSemicolon: false
+RequiresClausePosition: OwnLine
+RequiresExpressionIndentation: OuterScope
+SeparateDefinitionBlocks: Leave
+ShortNamespaceLines: 1
+SkipMacroDefinitionBody: true
+SortIncludes: Never
+SortJavaStaticImport: Before
+SortUsingDeclarations: LexicographicNumeric
+SpaceAfterCStyleCast: false
+SpaceAfterLogicalNot: false
+SpaceAfterTemplateKeyword: false
+SpaceAroundPointerQualifiers: Before
+SpaceBeforeAssignmentOperators: true
+SpaceBeforeCaseColon: false
+SpaceBeforeCpp11BracedList: 'true'
+SpaceBeforeCtorInitializerColon: 'false'
+SpaceBeforeInheritanceColon: true
+SpaceBeforeJsonColon: false
+SpaceBeforeParens: ControlStatements
+SpaceBeforeParensOptions:
+  AfterControlStatements: true
+  AfterForeachMacros: true
+  AfterFunctionDeclarationName: false
+  AfterFunctionDefinitionName: false
+  AfterIfMacros: true
+  AfterOverloadedOperator: false
+  AfterPlacementOperator: true
+  AfterRequiresInClause: false
+  AfterRequiresInExpression: false
+  BeforeNonEmptyParentheses: false
+SpaceBeforeRangeBasedForLoopColon: 'true'
+SpaceBeforeSquareBrackets: false
+SpaceInEmptyBlock: false
+SpacesBeforeTrailingComments: 1
+SpacesInAngles: Never
+SpacesInContainerLiterals: 'false'
+SpacesInLineCommentPrefix:
+  Maximum: -1
+  Minimum: 1
+SpacesInParens: Never
+SpacesInParensOptions:
+  InCStyleCasts: false
+  InConditionalStatements: false
+  InEmptyParentheses: false
+  Other: false
+SpacesInSquareBrackets: 'false'
+Standard: c++11
+StatementAttributeLikeMacros:
+- Q_EMIT
+StatementMacros:
+- Q_UNUSED
+- QT_REQUIRE_VERSION
+TabWidth: 12
+UseTab: Never
+VerilogBreakBetweenInstancePorts: false
+WhitespaceSensitiveMacros:
+- BOOST_PP_STRINGIZE
+- CF_SWIFT_NAME
+- NS_SWIFT_NAME
+- PP_STRINGIZE
+- STRINGIZE
+...
