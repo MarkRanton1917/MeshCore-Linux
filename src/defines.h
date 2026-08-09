@@ -70,6 +70,10 @@
 #define POST_AUTHOR_PREFIX 4
 #define MAX_ROOM_CLIENTS 64
 #define MAX_PASSWORD 32
+
+// Keys currently being made to wait after wrong passwords. Bounded like
+// everything else here, and small: the table is a speed bump, not a ledger.
+#define MAX_LOGIN_FAILURES 32
 #define MAX_NODE_NAME 32
 
 // Channels. A handful: each one costs a flood per post, and the airtime budget

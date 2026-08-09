@@ -718,6 +718,132 @@ static void testRequests()
 // A channel is a key, not a roster: anyone holding it can post and nobody
 // signs anything. So what arrives may become a post and nothing else, and what
 // the board receives directly goes back out so the two do not drift apart.
+// Guessing a password over the air is slow but free, and nobody is watching.
+static void testLoginLockout()
+{
+  section("room: wrong passwords");
+
+  room::Config config = defaultConfig();
+  config.maxLoginAttempts = 3;
+  config.loginLockout = 60000;
+
+  Fixture fixture(config);
+  auto& room = fixture.roomInstance;
+  const core::PublicKey guesser = keyOf(0x11);
+
+  room.tick(1000);
+  for (uint32_t attempt = 0; attempt < 3; attempt++) {
+    auto wrong = loginPayload(1000 + attempt, 0, "nope");
+    room.onAnon(guesser, ByteView { wrong.data(), wrong.size() });
+  }
+  that("no guess got in", room.clientCount() == 0 && fixture.sender.sent.empty());
+
+  // The right password now, and it must still be refused.
+  auto right = loginPayload(2000, 0, "guest");
+  room.onAnon(guesser, ByteView { right.data(), right.size() });
+  that("the key is locked out even with the right password", room.clientCount() == 0);
+
+  // Somebody else is unaffected: one shared counter would let anyone close the
+  // room by guessing badly on purpose.
+  const core::PublicKey innocent = keyOf(0x22);
+  auto theirs = loginPayload(2000, 0, "guest");
+  room.onAnon(innocent, ByteView { theirs.data(), theirs.size() });
+  that("another key still gets in", room.findClient(innocent) != nullptr);
+
+  room.tick(1000 + 60000);
+  auto afterWait = loginPayload(2001, 0, "guest");
+  room.onAnon(guesser, ByteView { afterWait.data(), afterWait.size() });
+  that("the lockout expires", room.findClient(guesser) != nullptr);
+
+  // And the count went with it: three more wrong ones are needed, not one.
+  auto wrongAgain = loginPayload(2002, 0, "nope");
+  room.onAnon(guesser, ByteView { wrongAgain.data(), wrongAgain.size() });
+  auto stillFine = loginPayload(2003, 0, "guest");
+  room.onAnon(guesser, ByteView { stillFine.data(), stillFine.size() });
+  that("one wrong guess after the wait is not enough to lock again",
+    room.findClient(guesser) && room.findClient(guesser)->lastLogin == 2003);
+
+  // A replayed login is not a wrong password, or replaying somebody's own
+  // login back at them would be enough to lock them out.
+  Fixture replayed(config);
+  auto& room2 = replayed.roomInstance;
+  const core::PublicKey victim = keyOf(0x33);
+  auto login = loginPayload(1000, 0, "guest");
+  room2.onAnon(victim, ByteView { login.data(), login.size() });
+  for (int i = 0; i < 5; i++)
+    room2.onAnon(victim, ByteView { login.data(), login.size() });
+
+  auto fresh = loginPayload(1001, 0, "guest");
+  room2.onAnon(victim, ByteView { fresh.data(), fresh.size() });
+  that("a replay storm does not lock the victim out",
+    room2.findClient(victim) && room2.findClient(victim)->lastLogin == 1001);
+
+  // Anonymous reading must not turn the admin password into a free target.
+  room::Config open = defaultConfig();
+  open.maxLoginAttempts = 3;
+  open.allowAnonymousRead = true;
+  Fixture guessing(open);
+  auto& room3 = guessing.roomInstance;
+  const core::PublicKey prober = keyOf(0x44);
+
+  for (uint32_t attempt = 0; attempt < 3; attempt++) {
+    auto probe = loginPayload(1000 + attempt, 0, "admin-guess");
+    room3.onAnon(prober, ByteView { probe.data(), probe.size() });
+  }
+  auto admin = loginPayload(2000, 0, "admin-secret");
+  room3.onAnon(prober, ByteView { admin.data(), admin.size() });
+  that("guessing counts even when anonymous reading lets you in",
+    room3.findClient(prober) == nullptr || room3.findClient(prober)->access != room::Access::ADMIN);
+
+  // An empty password is not a guess: it is how an anonymous reader arrives.
+  const core::PublicKey reader = keyOf(0x55);
+  for (uint32_t attempt = 0; attempt < 5; attempt++) {
+    auto anonymous = loginPayload(1000 + attempt, 0, "");
+    room3.onAnon(reader, ByteView { anonymous.data(), anonymous.size() });
+  }
+  that("an anonymous reader is never locked out",
+    room3.findClient(reader) && room3.findClient(reader)->access == room::Access::READ_ONLY);
+}
+
+// The table is full and somebody new logs in. Dropping the head of the list is
+// how the one admin who logs in rarely gets pushed out by a room of guests.
+static void testEviction()
+{
+  section("room: who gets evicted");
+
+  Fixture fixture(defaultConfig());
+  auto& room = fixture.roomInstance;
+
+  // An admin arrives first, so it is the head of the list and the old victim.
+  const core::PublicKey admin = keyOf(0x01);
+  auto adminLogin = loginPayload(1000, 0, "admin-secret");
+  room.onAnon(admin, ByteView { adminLogin.data(), adminLogin.size() });
+
+  // Fill the rest with guests, the second one deliberately the least recent.
+  for (size_t i = 1; i < MAX_ROOM_CLIENTS; i++) {
+    core::PublicKey guest;
+    guest.data.fill((uint8_t)i);
+    guest.data[1] = (uint8_t)(i >> 8);
+    auto login = loginPayload(i == 1 ? 500 : (uint32_t)(2000 + i), 0, "guest");
+    room.onAnon(guest, ByteView { login.data(), login.size() });
+  }
+  that("the table is full", room.clientCount() == MAX_ROOM_CLIENTS);
+
+  core::PublicKey stale;
+  stale.data.fill(1);
+  stale.data[1] = 0;
+  that("the least recent guest is there", room.findClient(stale) != nullptr);
+
+  const core::PublicKey newcomer = keyOf(0xFE);
+  auto newLogin = loginPayload(9000, 0, "guest");
+  room.onAnon(newcomer, ByteView { newLogin.data(), newLogin.size() });
+
+  that("the newcomer got in", room.findClient(newcomer) != nullptr);
+  that("the admin survived", room.findClient(admin) && room.findClient(admin)->access == room::Access::ADMIN);
+  that("the guest away longest went instead", room.findClient(stale) == nullptr);
+  that("and the table did not grow", room.clientCount() == MAX_ROOM_CLIENTS);
+}
+
 static void testChannels()
 {
   section("room: channels");
@@ -1044,6 +1170,8 @@ int main()
   testSameSecondPosts();
   testRequests();
   testChannels();
+  testLoginLockout();
+  testEviction();
   testCommands();
   testSettingsReachTheHost();
 

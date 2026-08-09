@@ -130,13 +130,95 @@ bool Room::addPost(const PublicKey& author, uint32_t timestamp, std::string_view
 
 // ------------------------------------------------------------------ login
 
+bool Room::lockedOut(const PublicKey& pk)
+{
+  for (size_t i = 0; i < failures_.size(); i++) {
+    if (!samePublicKey(failures_[i].pk, pk)) continue;
+
+    // Expired: forget it entirely rather than leave the count standing, or five
+    // wrong passwords spread over a week would still add up to a lockout.
+    if (failures_[i].until != 0 && failures_[i].until <= now_) {
+      failures_.erase(failures_.begin() + (long)i);
+      return false;
+    }
+    return failures_[i].until > now_;
+  }
+  return false;
+}
+
+void Room::noteFailure(const PublicKey& pk)
+{
+  for (Failure& failure : failures_) {
+    if (!samePublicKey(failure.pk, pk)) continue;
+
+    if (failure.count < 255) failure.count++;
+    if (failure.count >= config_.maxLoginAttempts) failure.until = now_ + config_.loginLockout;
+    return;
+  }
+
+  if (failures_.size() >= MAX_LOGIN_FAILURES) {
+    // The one closest to expiring goes, never a fresh lockout: dropping those
+    // would let an attacker clear their own by guessing under other keys.
+    size_t victim = 0;
+    for (size_t i = 1; i < failures_.size(); i++) {
+      if (failures_[i].until < failures_[victim].until) victim = i;
+    }
+    failures_.erase(failures_.begin() + (long)victim);
+  }
+
+  Failure failure;
+  failure.pk = pk;
+  failure.count = 1;
+  if (failure.count >= config_.maxLoginAttempts) failure.until = now_ + config_.loginLockout;
+  failures_.push_back(failure);
+}
+
+void Room::clearFailures(const PublicKey& pk)
+{
+  for (size_t i = 0; i < failures_.size(); i++) {
+    if (samePublicKey(failures_[i].pk, pk)) {
+      failures_.erase(failures_.begin() + (long)i);
+      return;
+    }
+  }
+}
+
+void Room::evictClient()
+{
+  if (clients_.empty()) return;
+
+  // Two passes: everybody who is not an admin first, and only if there is
+  // nobody else does an admin go. Taking the head of the list instead is how
+  // the one admin who logs in rarely gets pushed out by a room full of guests.
+  size_t victim = 0;
+  for (int pass = 0; pass < 2; pass++) {
+    const bool admins = pass == 1;
+    bool found = false;
+
+    for (size_t i = 0; i < clients_.size(); i++) {
+      if ((clients_[i].access == Access::ADMIN) != admins) continue;
+      if (!found || clients_[i].lastLogin < clients_[victim].lastLogin) {
+        victim = i;
+        found = true;
+      }
+    }
+    if (found) break;
+  }
+  clients_.erase(clients_.begin() + (long)victim);
+}
+
 Client* Room::authenticate(const PublicKey& pk, std::string_view password, uint32_t timestamp)
 {
   Client* client = findClient(pk);
 
   // First check of all: strictly newer than what we stored, or this is a
-  // replayed login and the only guard against it is right here.
+  // replayed login. Not counted as a wrong password — otherwise replaying a
+  // client's own login back at us would be enough to lock it out.
   if (client != nullptr && timestamp <= client->lastLogin) return nullptr;
+
+  // Ahead of the password check, so a key being made to wait costs nothing to
+  // refuse and learns nothing from how long the refusal took.
+  if (lockedOut(pk)) return nullptr;
 
   Access access = Access::NONE;
   if (passwordMatches(password, config_.adminPassword)) {
@@ -145,15 +227,19 @@ Client* Room::authenticate(const PublicKey& pk, std::string_view password, uint3
   else if (passwordMatches(password, config_.guestPassword)) {
     access = Access::GUEST;
   }
-  else if (config_.allowAnonymousRead) {
+  else {
+    // A password that was offered and matched nothing is a guess, and it counts
+    // even when anonymous reading then lets the sender in anyway. Without this
+    // the admin password could be hammered for free on a room that allows it.
+    if (!password.empty()) noteFailure(pk);
+    if (!config_.allowAnonymousRead) return nullptr;
     access = Access::READ_ONLY;
   }
-  else {
-    return nullptr;
-  }
+
+  if (access != Access::READ_ONLY) clearFailures(pk);
 
   if (client == nullptr) {
-    if (clients_.size() >= MAX_ROOM_CLIENTS) clients_.erase(clients_.begin());
+    if (clients_.size() >= MAX_ROOM_CLIENTS) evictClient();
     clients_.push_back(Client {});
     client = &clients_.back();
     client->pk = pk;

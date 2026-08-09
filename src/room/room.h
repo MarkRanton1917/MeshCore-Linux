@@ -147,6 +147,11 @@ struct Config {
   Millis retryDelay = 5000;
   uint16_t firmwareVersion = 1;
 
+  // Guessing a password over the air is slow, but it is free and nobody is
+  // watching, so a key that keeps getting it wrong is made to wait.
+  uint8_t maxLoginAttempts = 5;
+  Millis loginLockout = 60000;
+
   // Channels this room listens on. What arrives goes onto the board; what is
   // posted to the board goes back out to every one of them, so the channel and
   // the noticeboard do not drift apart.
@@ -249,6 +254,24 @@ private:
   void sendCliReply(const PublicKey& to, std::string_view text);
   void replyf(const PublicKey& to, const char* format, ...);
 
+  // Wrong passwords, counted per key. Per key and not globally on purpose: one
+  // shared counter would let anybody lock the whole room out by guessing badly
+  // on purpose. It does not stop somebody spending a fresh key on every guess —
+  // nothing here can — it stops one key hammering, which is the cheap attack.
+  struct Failure {
+    PublicKey pk;
+    uint8_t count = 0;
+    Millis until = 0; // locked out at least this long
+  };
+
+  bool lockedOut(const PublicKey& pk);
+  void noteFailure(const PublicKey& pk);
+  void clearFailures(const PublicKey& pk);
+
+  // Never the admin while anybody else is in the table, and otherwise whoever
+  // has been away longest.
+  void evictClient();
+
   uint32_t sanitiseTimestamp(uint32_t claimed) const;
   bool writeState(const std::string& path) const;
   bool readState(const std::string& path);
@@ -263,6 +286,7 @@ private:
 
   std::vector<Post> posts_; // ring buffer, oldest first
   std::vector<Client> clients_;
+  std::vector<Failure> failures_; // not saved: a lockout outliving a reboot is a way in for nobody
   size_t nextClientIdx_ = 0;
 
   // Saved with the state. Restarting at 1 while a client still holds a bookmark
