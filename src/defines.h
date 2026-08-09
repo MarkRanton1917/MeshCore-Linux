@@ -69,15 +69,16 @@
 #define POST_AUTHOR_PREFIX 4
 #define MAX_ROOM_CLIENTS 64
 #define MAX_PASSWORD 32
+#define MAX_NODE_NAME 32
+
 #define ROOM_FORMAT_VERSION 1
+
+// A reply has to fit one frame: 184 payload bytes, less the envelope, less what
+// AES padding rounds up, less the text prefix. 160 leaves room to spare.
+#define MAX_CLI_REPLY 160
 
 // Login request plaintext: timestamp(4) syncSince(4) password(rest).
 #define LOGIN_REQUEST_PREFIX_SIZE 8
-
-// txt_type values carried in the upper six bits of the text flags byte.
-#define TEXT_TYPE_PLAIN 0
-#define TEXT_TYPE_CLI 1
-#define TEXT_TYPE_SIGNED 2
 
 using ByteView = std::span<const std::uint8_t>;
 using ByteSpan = std::span<std::uint8_t>;

@@ -133,6 +133,95 @@ private:
   routing::Router* router_ = nullptr;
 };
 
+// Everything an admin command reaches for that the room does not own. Nothing
+// here acts at once: a command runs inside the receive path, and rebooting or
+// transmitting from there would cut off the reply that is still to be sent.
+// Each one sets an intent the main loop picks up on its next turn.
+class HostAdmin : public room::Admin {
+public:
+  HostAdmin(std::string name, platform::Overlay& overlay, platform::Millis startedAt)
+    : name_(std::move(name)),
+      overlay_(overlay),
+      startedAt_(startedAt)
+  {
+  }
+
+  void sendAdvert() override
+  {
+    advertWanted_ = true;
+  }
+
+  bool setClock(uint32_t unixSeconds) override
+  {
+    return platform::SystemClock::setWall(unixSeconds);
+  }
+
+  std::string nodeName() const override
+  {
+    return name_;
+  }
+
+  // Stored before it takes effect: a name that reverts at the next restart is
+  // worse than one that could not be changed at all.
+  bool setNodeName(std::string_view name) override
+  {
+    if (!saveSetting("node.name", name)) return false;
+
+    name_.assign(name);
+    return true;
+  }
+
+  bool saveSetting(std::string_view key, std::string_view value) override
+  {
+    if (!overlay_.set(key, value)) {
+      platform::Log::write(platform::LogLevel::ERROR, "cannot write %s", overlay_.path().c_str());
+      return false;
+    }
+    platform::Log::write(platform::LogLevel::INFO, "setting %.*s changed over the air", (int)key.size(), key.data());
+    return true;
+  }
+
+  void requestReboot() override
+  {
+    rebootAt_ = now_ + kRebootDelay;
+  }
+
+  uint32_t uptime() const override
+  {
+    return (uint32_t)((now_ - startedAt_) / 1000);
+  }
+
+  // Called once per turn of the loop, before the intents are read.
+  void tick(platform::Millis now)
+  {
+    now_ = now;
+  }
+
+  bool takeAdvertRequest()
+  {
+    const bool wanted = advertWanted_;
+    advertWanted_ = false;
+    return wanted;
+  }
+
+  bool rebootDue() const
+  {
+    return rebootAt_ != 0 && now_ >= rebootAt_;
+  }
+
+private:
+  // Long enough for the reply to clear the transmit queue. Exiting the instant
+  // the command lands loses it, and the admin sees a node that went quiet.
+  static constexpr platform::Millis kRebootDelay = 3000;
+
+  std::string name_;
+  platform::Overlay& overlay_;
+  platform::Millis startedAt_ = 0;
+  platform::Millis now_ = 0;
+  platform::Millis rebootAt_ = 0;
+  bool advertWanted_ = false;
+};
+
 // Our own advert: build it with an empty signature, sign the frame that
 // results, then put the signature back where it belongs.
 std::vector<uint8_t> buildAdvertPayload(const identity::Store& store, uint32_t timestamp, const std::string& name)
@@ -201,7 +290,27 @@ int main(int argc, char** argv)
     std::fprintf(stderr, "cannot read %s\n", configPath.c_str());
     return 1;
   }
+
+  // Where the node keeps what it learned, and the one setting an overlay may
+  // not shadow: the overlay lives inside it.
+  const std::string dataDir = config.get("node.dir", "./data");
+
+  // What an admin changed over the air, laid over the operator's file, which is
+  // never written to. A damaged overlay is fatal on purpose — coming up with
+  // half of those settings, a password among them, is worse than not coming up.
+  platform::Overlay overlay(dataDir + "/overrides.json");
+  if (!overlay.load()) {
+    std::fprintf(stderr, "cannot read %s\n", overlay.path().c_str());
+    return 1;
+  }
+  config.applyOverlay(overlay);
+
   platform::Log::setLevel(levelFromName(config.get("log.level", "info")));
+  if (!overlay.values().empty()) {
+    // Otherwise editing the config and seeing nothing change is a mystery.
+    platform::Log::write(platform::LogLevel::WARN, "%zu setting(s) come from %s, not the config",
+      overlay.values().size(), overlay.path().c_str());
+  }
 
   if (!core::init(nullptr)) {
     platform::Log::write(platform::LogLevel::ERROR, "crypto backend failed to start");
@@ -216,8 +325,6 @@ int main(int argc, char** argv)
     platform::Log::write(platform::LogLevel::ERROR, "wall clock not synchronised yet");
     return 1;
   }
-
-  const std::string dataDir = config.get("node.dir", "./data");
 
   identity::Store store;
   if (!store.loadOrCreate(dataDir)) {
@@ -280,11 +387,15 @@ int main(int argc, char** argv)
   routing::Config routingConfig;
   routingConfig.bus = telemetryOn ? &bus : nullptr;
 
+  // Already the effective value: the overlay was laid over the config above.
+  HostAdmin admin(config.get("node.name", "room"), overlay, clock.mono());
+
   room::Config roomConfig;
   roomConfig.adminPassword = config.get("room.admin_password");
   roomConfig.guestPassword = config.get("room.guest_password");
   roomConfig.allowAnonymousRead = config.getBool("room.anonymous_read", false);
   roomConfig.bus = telemetryOn ? &bus : nullptr;
+  roomConfig.admin = &admin;
 
   room::Room room(store, sender, roomConfig);
   if (!room.load(dataDir)) {
@@ -309,23 +420,32 @@ int main(int argc, char** argv)
   platform::Millis nextAdvert = 0;
   platform::Millis nextReport = 0;
 
-  const std::string name = config.get("node.name", "room");
-  platform::Log::write(platform::LogLevel::INFO, "started");
+  platform::Log::write(platform::LogLevel::INFO, "started as '%s'", admin.nodeName().c_str());
 
   while (stopping == 0) {
     const platform::Millis now = clock.mono();
 
+    admin.tick(now);
     device->tick(now);
     router.tick(now);
     room.setServerTime(clock.wall());
     room.tick(now);
 
-    if (now >= nextAdvert) {
-      const std::vector<uint8_t> payload = buildAdvertPayload(store, clock.wall(), name);
+    // On the timer, or because a command asked for one — after a rename the
+    // network holds the old name until the next advert goes out.
+    if (now >= nextAdvert || admin.takeAdvertRequest()) {
+      const std::vector<uint8_t> payload = buildAdvertPayload(store, clock.wall(), admin.nodeName());
       if (!payload.empty()) {
         router.sendFlood(packet::PayloadType::ADVERT, ByteView { payload.data(), payload.size() });
       }
       nextAdvert = now + advertEvery;
+    }
+
+    // Exiting is the whole of it: the supervisor restarts us. Late enough that
+    // the reply to the command has left the queue.
+    if (admin.rebootDue()) {
+      platform::Log::write(platform::LogLevel::INFO, "reboot requested over the air");
+      break;
     }
 
     if (now >= nextFlush) {

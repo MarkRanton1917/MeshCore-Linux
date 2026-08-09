@@ -166,6 +166,91 @@ static void testConfig()
     !config.loadFromString("{ \"name\": \"other\", ") && config.get("name") == "node-one");
 }
 
+// The overlay exists so that the operator's config is never written to. What
+// has to hold is the precedence, that a value written is a value on disk before
+// the call returns, and that deleting the file undoes everything.
+static void testOverlay()
+{
+  section("platform: config overlay");
+
+  char templ[] = "meshcore_overlay_XXXXXX";
+  const std::string dir = mkdtemp(templ);
+  const std::string path = dir + "/overrides.json";
+
+  {
+    platform::Overlay overlay(path);
+    that("a node that was never told anything loads clean", overlay.load() && overlay.values().empty());
+    that("and reads back nothing", !overlay.get("node.name").has_value());
+
+    that("a value is stored", overlay.set("node.name", "Radio Hut"));
+    that("and readable at once", overlay.get("node.name") == "Radio Hut");
+
+    struct stat info {};
+    that("the file exists straight away", stat(path.c_str(), &info) == 0);
+    that("mode is 0600", (info.st_mode & 07777) == 0600);
+
+    // An empty value is a setting, not an absence: it is how a password is
+    // cleared, and it must survive as an entry of its own.
+    that("empty values are stored", overlay.set("room.guest_password", ""));
+    that("overwriting works", overlay.set("node.name", "Second"));
+  }
+
+  {
+    platform::Overlay overlay(path);
+    that("reload succeeds", overlay.load());
+    that("the last write won", overlay.get("node.name") == "Second");
+    that("the empty value came back as an entry",
+      overlay.get("room.guest_password").has_value() && overlay.get("room.guest_password")->empty());
+
+    platform::Config config;
+    that("config parses", config.loadFromString(R"({"node":{"name":"from-config","dir":"./data"},
+        "room":{"guest_password":"from-config"},
+        "radio":{"udp_peers":["127.0.0.1:1","127.0.0.1:2"]}})"));
+
+    config.applyOverlay(overlay);
+    that("the overlay wins", config.get("node.name") == "Second");
+    that("including for an empty value", config.get("room.guest_password", "fallback").empty());
+    that("keys it does not mention are untouched", config.get("node.dir") == "./data");
+    that("and so are lists", config.getList("radio.udp_peers").size() == 2);
+
+    // A scalar shadowing a list has to take the list with it, or getList would
+    // still be answering from the config file.
+    that("a list can be shadowed", overlay.set("radio.udp_peers", ""));
+    config.applyOverlay(overlay);
+    that("and the old list is gone", config.getList("radio.udp_peers").empty());
+  }
+
+  {
+    // Hand-written nesting is accepted too: the same flattener runs on both.
+    platform::Overlay overlay(path);
+    FILE* file = fopen(path.c_str(), "w");
+    that("hand-written overlay", file != nullptr && fputs("{\"node\": {\"name\": \"By Hand\"}}", file) >= 0);
+    if (file != nullptr) fclose(file);
+
+    that("nested spelling loads", overlay.load());
+    that("and lands on the dotted key", overlay.get("node.name") == "By Hand");
+  }
+
+  {
+    // Damaged is fatal: coming up with half the settings an admin believes are
+    // in force is worse than not coming up.
+    platform::Overlay overlay(path);
+    FILE* file = fopen(path.c_str(), "w");
+    if (file != nullptr) {
+      fputs("{ \"node.name\": ", file);
+      fclose(file);
+    }
+    that("a damaged overlay is an error", !overlay.load());
+  }
+
+  unlink(path.c_str());
+  {
+    platform::Overlay overlay(path);
+    that("deleting the file undoes everything", overlay.load() && overlay.values().empty());
+  }
+  rmdir(dir.c_str());
+}
+
 static void testLogLevels()
 {
   section("platform: log levels");
@@ -188,6 +273,7 @@ int main()
   testMemoryStore();
   testFileStore();
   testConfig();
+  testOverlay();
   testLogLevels();
   return check::report();
 }

@@ -4,7 +4,10 @@
 
 #include "room.h"
 
+#include <algorithm>
 #include <cerrno>
+#include <cstdarg>
+#include <cstdio>
 #include <cstring>
 
 #include <fcntl.h>
@@ -217,40 +220,388 @@ bool Room::handleText(const identity::Contact& from, ByteView plain)
   Client* client = findClient(from.pk);
   if (client == nullptr) return false; // never logged in
 
-  switch (message->txtType) {
-  case TEXT_TYPE_PLAIN: {
+  switch ((TextType)message->txtType) {
+  case TextType::PLAIN: {
     if (!can(*client, Action::POST)) return false;
 
     const std::string_view text((const char*)message->message.data(), message->message.size());
     addPost(from.pk, message->timestamp, text);
     return true;
   }
-  case TEXT_TYPE_CLI:
-    // Admin only, and handled by a separate parser.
-    return can(*client, Action::COMMAND);
-  case TEXT_TYPE_SIGNED:
+  case TextType::CLI: {
+    const std::string_view line((const char*)message->message.data(), message->message.size());
+    return handleCommand(*client, message->timestamp, line);
+  }
+  case TextType::SIGNED:
   default:
     // A room is not expected to receive these.
     return false;
   }
 }
 
-// A CLI command must not be acknowledged; a post always is, whether we took it
-// or refused it on rights — otherwise the client retries until it gives up and
-// then reports the message as undelivered.
+// A CLI command must not be acknowledged: its reply is the acknowledgement, and
+// two of them would leave the client showing the command as answered twice. A
+// post always is, whether we took it or refused it on rights — otherwise the
+// client retries until it gives up and reports the message as undelivered.
 bool Room::shouldAck(packet::PayloadType type, ByteView plain)
 {
   if (type != packet::PayloadType::TXT_MSG) return true;
 
   auto message = packet::decodeText(plain);
   if (!message.has_value()) return true;
-  return message->txtType != TEXT_TYPE_CLI;
+  return (TextType)message->txtType != TextType::CLI;
 }
 
 bool Room::shouldForward(const packet::Packet& p)
 {
   (void)p;
   return true;
+}
+
+// ------------------------------------------------------------------ commands
+
+// Takes the leading word and advances the line past it. Whitespace-only leaves
+// an empty word and an empty line, which every caller reads as "no argument".
+static std::string_view takeWord(std::string_view& line)
+{
+  const size_t begin = line.find_first_not_of(" \t");
+  if (begin == std::string_view::npos) {
+    line = {};
+    return {};
+  }
+
+  const size_t end = line.find_first_of(" \t", begin);
+  if (end == std::string_view::npos) {
+    const std::string_view word = line.substr(begin);
+    line = {};
+    return word;
+  }
+
+  const std::string_view word = line.substr(begin, end - begin);
+  line = line.substr(end + 1);
+  return word;
+}
+
+// Arguments that are the rest of the line — a name, a password — keep their
+// inner spaces and lose the surrounding ones.
+static std::string_view trimmed(std::string_view line)
+{
+  // Spelled out rather than written as a literal: the trailing NUL matters.
+  // Clients that pad the message to a fixed length send it, and a password with
+  // an invisible NUL on the end never matches again.
+  static constexpr char kBlank[] = { ' ', '\t', '\r', '\n', '\0' };
+  const std::string_view blank(kBlank, sizeof kBlank);
+
+  const size_t begin = line.find_first_not_of(blank);
+  if (begin == std::string_view::npos) return {};
+
+  const size_t end = line.find_last_not_of(blank);
+  return line.substr(begin, end - begin + 1);
+}
+
+// Hand-rolled: the input is a view off the air, not a C string, and a stray
+// letter must fail rather than parse as far as it goes.
+static bool parseUint32(std::string_view text, uint32_t& out)
+{
+  if (text.empty() || text.size() > 10) return false;
+
+  uint64_t value = 0;
+  for (const char digit : text) {
+    if (digit < '0' || digit > '9') return false;
+    value = value * 10 + (uint64_t)(digit - '0');
+  }
+  if (value > 0xFFFFFFFFull) return false;
+
+  out = (uint32_t)value;
+  return true;
+}
+
+// Days to a civil date, Howard Hinnant's algorithm. Here rather than in gmtime
+// because that would be a call into the C library's own notion of the timezone,
+// and this has to be UTC on every host.
+static void civilFromDays(int64_t days, int& year, unsigned& month, unsigned& day)
+{
+  days += 719468;
+  const int64_t era = (days >= 0 ? days : days - 146096) / 146097;
+  const unsigned dayOfEra = (unsigned)(days - era * 146097);
+  const unsigned yearOfEra = (dayOfEra - dayOfEra / 1460 + dayOfEra / 36524 - dayOfEra / 146096) / 365;
+  const unsigned dayOfYear = dayOfEra - (365 * yearOfEra + yearOfEra / 4 - yearOfEra / 100);
+  const unsigned monthPrime = (5 * dayOfYear + 2) / 153;
+
+  day = dayOfYear - (153 * monthPrime + 2) / 5 + 1;
+  month = monthPrime + (monthPrime < 10 ? 3 : -9);
+  year = (int)((int64_t)yearOfEra + era * 400 + (month <= 2 ? 1 : 0));
+}
+
+static void formatUtc(uint32_t epoch, char* out, size_t size)
+{
+  const int64_t days = (int64_t)(epoch / 86400);
+  const uint32_t seconds = epoch % 86400;
+
+  int year = 0;
+  unsigned month = 0;
+  unsigned day = 0;
+  civilFromDays(days, year, month, day);
+
+  std::snprintf(
+    out, size, "%02u:%02u:%02u %u/%u/%d UTC", seconds / 3600, (seconds / 60) % 60, seconds % 60, day, month, year);
+}
+
+void Room::sendCliReply(const PublicKey& to, std::string_view text)
+{
+  // Truncate rather than drop: a reply that does not fit is still worth more
+  // than the silence the client would otherwise sit in.
+  text = text.substr(0, MAX_CLI_REPLY);
+
+  packet::TextMsg message;
+  message.timestamp = serverTime_;
+  message.txtType = (uint8_t)TextType::CLI;
+  message.attempt = 0;
+  message.message = ByteView { (const uint8_t*)text.data(), text.size() };
+
+  std::vector<uint8_t> payload(MAX_PACKET_PAYLOAD);
+  auto size = packet::encodeText(message, ByteSpan { payload.data(), payload.size() });
+  if (!size.has_value()) return;
+
+  // No ack asked for: this reply is the acknowledgement.
+  sender_.sendDirect(to, packet::PayloadType::TXT_MSG, ByteView { payload.data(), *size }, false);
+}
+
+void Room::replyf(const PublicKey& to, const char* format, ...)
+{
+  char buffer[MAX_CLI_REPLY + 1];
+
+  va_list args;
+  va_start(args, format);
+  const int written = std::vsnprintf(buffer, sizeof buffer, format, args);
+  va_end(args);
+  if (written < 0) return;
+
+  sendCliReply(to, std::string_view(buffer, std::min((size_t)written, sizeof buffer - 1)));
+}
+
+bool Room::handleCommand(Client& client, uint32_t timestamp, std::string_view line)
+{
+  // A refusal answers too. A guest who typed a command and got nothing back
+  // cannot tell that from a node which has stopped listening.
+  if (!can(client, Action::COMMAND)) {
+    sendCliReply(client.pk, "ERR - admin rights required");
+    return false;
+  }
+
+  // Backwards in time means replayed, and a captured `reboot` is worth
+  // replaying. Equal is allowed through: a client that saw no reply resends the
+  // identical frame, and answering that again is the whole point.
+  if (timestamp < client.lastCommand) return false;
+  client.lastCommand = timestamp;
+
+  // Trimmed once here so no verb or key downstream carries the padding some
+  // clients put on the end of a message.
+  std::string_view rest = trimmed(line);
+  const std::string_view verb = takeWord(rest);
+
+  if (verb == "help") {
+    sendCliReply(client.pk, "clock, time <epoch>, ver, advert, set, get, clear posts, reboot");
+    return true;
+  }
+  if (verb == "ver") {
+    replyf(client.pk, "MeshCore room v%u", (unsigned)config_.firmwareVersion);
+    return true;
+  }
+  if (verb == "clock" || verb == "time") {
+    commandClock(client.pk, rest);
+    return true;
+  }
+  if (verb == "advert") {
+    if (config_.admin == nullptr) {
+      sendCliReply(client.pk, "ERR - no radio attached");
+      return false;
+    }
+    config_.admin->sendAdvert();
+    sendCliReply(client.pk, "OK - advert sent");
+    return true;
+  }
+  if (verb == "set") {
+    commandSet(client.pk, rest);
+    return true;
+  }
+  if (verb == "get") {
+    commandGet(client.pk, rest);
+    return true;
+  }
+  if (verb == "clear") {
+    commandClear(client.pk, rest);
+    return true;
+  }
+  if (verb == "reboot") {
+    if (config_.admin == nullptr) {
+      sendCliReply(client.pk, "ERR - not supported here");
+      return false;
+    }
+    // Reply first. The host holds the stop back long enough for the queue to
+    // drain, or the admin would never learn the command was taken.
+    sendCliReply(client.pk, "OK - rebooting");
+    config_.admin->requestReboot();
+    return true;
+  }
+
+  replyf(client.pk, "ERR - unknown command '%.*s'", (int)std::min<size_t>(verb.size(), 24), verb.data());
+  return false;
+}
+
+// No argument reports the clock, an argument sets it. Both spellings land here
+// because half the clients send `clock` and half `time`.
+void Room::commandClock(const PublicKey& to, std::string_view rest)
+{
+  const std::string_view argument = takeWord(rest);
+
+  if (argument.empty()) {
+    if (serverTime_ == 0) {
+      sendCliReply(to, "ERR - clock not set");
+      return;
+    }
+    char stamp[48];
+    formatUtc(serverTime_, stamp, sizeof stamp);
+    replyf(to, "%s (%u)", stamp, (unsigned)serverTime_);
+    return;
+  }
+
+  uint32_t epoch = 0;
+  if (!parseUint32(argument, epoch)) {
+    sendCliReply(to, "ERR - expected a unix timestamp");
+    return;
+  }
+  // The same floor the host applies at startup: a node dated 1970 corrupts its
+  // neighbours' records, and taking that over the air would be a way to do it
+  // on purpose.
+  if (epoch <= 1577836800u) {
+    sendCliReply(to, "ERR - timestamp before 2020, refused");
+    return;
+  }
+  if (config_.admin == nullptr || !config_.admin->setClock(epoch)) {
+    sendCliReply(to, "ERR - host refused the clock change");
+    return;
+  }
+
+  setServerTime(epoch);
+  char stamp[48];
+  formatUtc(epoch, stamp, sizeof stamp);
+  replyf(to, "OK - clock set to %s", stamp);
+}
+
+void Room::commandSet(const PublicKey& to, std::string_view rest)
+{
+  const std::string_view key = takeWord(rest);
+  const std::string_view value = trimmed(rest);
+
+  if (key == "name") {
+    if (value.empty() || value.size() > MAX_NODE_NAME) {
+      replyf(to, "ERR - name must be 1..%u characters", (unsigned)MAX_NODE_NAME);
+      return;
+    }
+    if (config_.admin == nullptr || !config_.admin->setNodeName(value)) {
+      sendCliReply(to, "ERR - host refused the name change");
+      return;
+    }
+    // The network still holds the old name until something says otherwise.
+    config_.admin->sendAdvert();
+    replyf(to, "OK - name is now %.*s", (int)value.size(), value.data());
+    return;
+  }
+
+  if (key == "password" || key == "guest.password") {
+    if (value.size() > MAX_PASSWORD) {
+      replyf(to, "ERR - password longer than %u characters", (unsigned)MAX_PASSWORD);
+      return;
+    }
+    // Stored first, applied second. The other order would leave an admin told
+    // the password had changed while the next restart brings the old one back.
+    const bool forAdmin = key == "password";
+    if (config_.admin == nullptr
+      || !config_.admin->saveSetting(forAdmin ? "room.admin_password" : "room.guest_password", value)) {
+      sendCliReply(to, "ERR - could not store the new password");
+      return;
+    }
+
+    // Empty is a legitimate value: it closes that role off entirely.
+    // Sessions already open keep the rights they were granted — their access is
+    // stored per client and outlives the password that produced it.
+    if (forAdmin) {
+      config_.adminPassword.assign(value);
+    }
+    else {
+      config_.guestPassword.assign(value);
+    }
+    // Never echoed back, not even a length.
+    replyf(to, "OK - %s password %s", key == "password" ? "admin" : "guest", value.empty() ? "cleared" : "set");
+    return;
+  }
+
+  if (key == "anonymous.read") {
+    bool allow = false;
+    if (value == "on" || value == "1" || value == "true") {
+      allow = true;
+    }
+    else if (value == "off" || value == "0" || value == "false") {
+      allow = false;
+    }
+    else {
+      sendCliReply(to, "ERR - expected on or off");
+      return;
+    }
+
+    // Stored in the config's own spelling, not the one the admin typed, so the
+    // overlay shadows exactly the key it is named after.
+    if (config_.admin == nullptr || !config_.admin->saveSetting("room.anonymous_read", allow ? "true" : "false")) {
+      sendCliReply(to, "ERR - could not store the setting");
+      return;
+    }
+
+    config_.allowAnonymousRead = allow;
+    replyf(to, "OK - anonymous read %s", allow ? "on" : "off");
+    return;
+  }
+
+  sendCliReply(to, "ERR - known keys: name, password, guest.password, anonymous.read");
+}
+
+void Room::commandGet(const PublicKey& to, std::string_view rest)
+{
+  const std::string_view key = takeWord(rest);
+
+  if (key == "stats") {
+    const uint32_t uptime = config_.admin != nullptr ? config_.admin->uptime() : 0;
+    replyf(to, "posts %zu/%u, clients %zu/%u, up %uh%02um", posts_.size(), (unsigned)MAX_POSTS, clients_.size(),
+      (unsigned)MAX_ROOM_CLIENTS, uptime / 3600, (uptime / 60) % 60);
+    return;
+  }
+  if (key == "name") {
+    const std::string name = config_.admin != nullptr ? config_.admin->nodeName() : std::string();
+    replyf(to, "name %s", name.empty() ? "(unknown)" : name.c_str());
+    return;
+  }
+  if (key == "time") {
+    commandClock(to, {});
+    return;
+  }
+
+  sendCliReply(to, "ERR - known keys: stats, name, time");
+}
+
+void Room::commandClear(const PublicKey& to, std::string_view rest)
+{
+  const std::string_view key = takeWord(rest);
+
+  if (key == "posts") {
+    const size_t removed = posts_.size();
+    posts_.clear();
+    // The clients keep their bookmarks. Rewinding them would replay whatever
+    // arrives next from the beginning for everybody.
+    replyf(to, "OK - %zu posts cleared", removed);
+    return;
+  }
+
+  sendCliReply(to, "ERR - known keys: posts");
 }
 
 // ------------------------------------------------------------------ push
@@ -296,7 +647,7 @@ void Room::pushNextPost(Client& client)
   // parallel sends to one address jam the air and scramble the acks.
   packet::TextMsg message;
   message.timestamp = post->timestamp;
-  message.txtType = TEXT_TYPE_SIGNED;
+  message.txtType = (uint8_t)TextType::SIGNED;
   message.attempt = 0;
 
   std::vector<uint8_t> body;
@@ -348,6 +699,9 @@ void Room::onDeliveryFailed(SendId id)
 //   posts:        timestamp(4) author(4) length(1) text
 //   byte          client count
 //   clients:      pk(32) access(1) syncSince(4) lastLogin(4)
+//
+// Settings an admin changed over the air are not here: they live in the config
+// overlay, where a person can read them and delete them.
 
 bool Room::writeState(const std::string& path) const
 {

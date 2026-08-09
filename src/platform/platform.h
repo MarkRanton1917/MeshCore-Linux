@@ -36,6 +36,12 @@ public:
   // A node that advertises itself dated 1970 corrupts its neighbours' records,
   // so the host waits for the first sync before starting.
   static bool wallLooksSynced(uint32_t seconds);
+
+  // Steps the wall clock, for the node that has no NTP and gets told the time
+  // by an admin instead. False without the capability to do it, which is the
+  // normal case for an unprivileged process — the caller reports that, it is
+  // not an error worth refusing to run over.
+  static bool setWall(uint32_t seconds);
 };
 
 // Hands the test moves by itself. Without it a timeout test either cannot be
@@ -121,11 +127,58 @@ private:
   static LogLevel level_;
 };
 
+// The few settings an admin changed over the air, kept in a file of their own.
+//
+// The alternative — writing the operator's config back — was rejected on three
+// counts: that file is often not writable at all (root-owned, laid down by
+// configuration management, mounted read-only), the parser below flattens it to
+// text and cannot reproduce it, and mixing what was declared with what was
+// changed since leaves no way to answer either question. This file is plain
+// JSON, readable by eye, and a change is undone by deleting it.
+//
+// Keys are the config's own dotted names, so an entry here shadows exactly the
+// key it is named after.
+class Overlay {
+public:
+  explicit Overlay(std::string path);
+
+  // A missing file is the normal case, not a failure. A damaged one is: coming
+  // up with half the settings an admin believes are in force — a password among
+  // them — is worse than refusing to start.
+  bool load();
+
+  // Writes through at once. A setting that waits for a flush is a setting lost
+  // to the next power cut, and the admin was told it was saved.
+  bool set(std::string_view key, std::string_view value);
+
+  std::optional<std::string> get(std::string_view key) const;
+
+  const std::map<std::string, std::string>& values() const
+  {
+    return values_;
+  }
+  const std::string& path() const
+  {
+    return path_;
+  }
+
+private:
+  bool save() const;
+
+  std::string path_;
+  std::map<std::string, std::string> values_;
+};
+
 // Parsed once at startup into a struct. Nothing reads it on a hot path.
 class Config {
 public:
   bool loadFromString(std::string_view text);
   bool loadFile(const std::string& path);
+
+  // Laid over what loadFile read; an overlay value wins. Called once at
+  // startup, after which every get() below answers with the effective setting
+  // and nothing downstream has to know there were two sources.
+  void applyOverlay(const Overlay& overlay);
 
   std::string get(std::string_view key, std::string_view fallback = "") const;
   long getInt(std::string_view key, long fallback = 0) const;

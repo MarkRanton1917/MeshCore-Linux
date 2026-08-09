@@ -91,6 +91,60 @@ Configuration is [meshcore.json](meshcore.json); every key has a default:
 | `room.anonymous_read` | Let strangers read without a password |
 | `telemetry.enabled`, `telemetry.queue`, `telemetry.report_ms` | Event ring and reporting interval |
 
+### Admin commands
+
+An admin — someone who logged in with `room.admin_password` — can drive the node
+over the air with CLI text messages. A command is never acknowledged: its reply
+*is* the acknowledgement, so every path through the parser answers, refusals
+included. A command whose timestamp runs backwards is dropped as a replay; the
+same timestamp resent is answered again, because a client that saw no reply
+resends the identical frame.
+
+| Command | Does |
+| --- | --- |
+| `help` | Lists the verbs |
+| `ver` | Firmware version |
+| `clock` | Reports the time as `HH:MM:SS D/M/YYYY UTC` |
+| `time <epoch>` | Sets the wall clock. Needs a privileged process, and anything before 2020 is refused |
+| `advert` | Floods an advert now |
+| `set name <text>` | Renames the node and announces it |
+| `set password <text>` | New admin password. Empty closes the role |
+| `set guest.password <text>` | The same for guests |
+| `set anonymous.read on\|off` | Reading without a password |
+| `get stats` | Posts, clients, uptime |
+| `get name`, `get time` | Read one value back |
+| `clear posts` | Empties the noticeboard, leaving the clients' bookmarks alone |
+| `reboot` | Exits after the reply is on its way; the supervisor restarts the process |
+
+### The overlay
+
+A `set` command has to outlive a restart, or the config file would undo it at
+the next start. The node never writes to that file: it is often not writable at
+all — root-owned, laid down by configuration management, mounted read-only —
+and the parser here flattens it to text and could not reproduce it. What a
+command changed goes to `<node.dir>/overrides.json` instead, and is laid over
+the config at startup:
+
+```json
+{
+  "node.name": "Radio Hut",
+  "room.admin_password": "something-else"
+}
+```
+
+Keys are the config's own dotted names, so an entry shadows exactly the key it
+is named after; the nested spelling works too. The overlay wins wherever the two
+disagree, which is why the node says so on startup:
+
+```
+[WARN] 2 setting(s) come from ./data/overrides.json, not the config
+```
+
+Delete the file and everything reverts to what the config declares. A damaged
+overlay is fatal rather than ignored: coming up with half the settings an admin
+believes are in force, a password among them, is worse than not coming up.
+`node.dir` is the one key an overlay cannot shadow — the file lives inside it.
+
 ### Radio drivers
 
 `udp` carries frames over UDP between processes on one machine or hosts on a

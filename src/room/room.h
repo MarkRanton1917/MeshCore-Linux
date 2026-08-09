@@ -31,6 +31,43 @@ struct Sender {
   virtual SendId sendDirect(const PublicKey& to, packet::PayloadType type, ByteView payload, bool wantAck) = 0;
 };
 
+// What a command needs and the room does not own: the radio, the system clock
+// and the process itself all sit above it. Optional like the bus — with no host
+// attached those commands answer "unsupported" rather than pretending.
+struct Admin {
+  virtual ~Admin() = default;
+
+  // Floods a fresh advert. Wanted on demand and after the name changes.
+  virtual void sendAdvert() = 0;
+
+  // Steps the wall clock. False when the host refuses — usually not root.
+  virtual bool setClock(uint32_t unixSeconds) = 0;
+
+  virtual std::string nodeName() const = 0;
+  virtual bool setNodeName(std::string_view name) = 0;
+
+  // Persists a setting under the same key the config file uses, so what an
+  // admin changed over the air is still in force after a restart. False means
+  // it could not be stored — and then the room refuses the change outright
+  // rather than applying one that quietly expires at the next reboot.
+  virtual bool saveSetting(std::string_view key, std::string_view value) = 0;
+
+  // Requested, not performed: the loop finishes the tick and saves state first.
+  virtual void requestReboot() = 0;
+
+  // Seconds since the process started. The room has no clock of its own.
+  virtual uint32_t uptime() const = 0;
+};
+
+// txt_type, the upper six bits of the text flags byte. packet carries it as a
+// plain number and never looks at it: what the values mean is the room's
+// business, and nothing below this layer has any use for the distinction.
+enum class TextType : uint8_t {
+  PLAIN = 0, // somebody posting to the board
+  CLI = 1, // an admin command, answered rather than acked
+  SIGNED = 2 // what the room pushes back out, author prefix and all
+};
+
 enum class Access : uint8_t {
   NONE = 0,
   READ_ONLY = 1, // only when anonymous reading is allowed
@@ -55,6 +92,7 @@ struct Client {
   Access access = Access::NONE;
   uint32_t syncSince = 0; // everything up to here has been handed over
   uint32_t lastLogin = 0; // replay guard for the login packet
+  uint32_t lastCommand = 0; // and for commands, which are worth replaying
   bool pending = false;
   SendId pendingId = 0;
   uint32_t pendingPost = 0; // timestamp of the post in flight
@@ -76,6 +114,9 @@ struct Config {
 
   // Optional, same rule as routing: room publishes, never calls telemetry.
   telemetry::Bus* bus = nullptr;
+
+  // Optional too. Absent, the commands that reach outside the room refuse.
+  Admin* admin = nullptr;
 };
 
 class Room : public routing::Delegate {
@@ -106,6 +147,11 @@ public:
   // neither still gets in with cut-down rights.
   Client* authenticate(const PublicKey& pk, std::string_view password, uint32_t timestamp);
 
+  // Admin only, and the reply is the whole acknowledgement: a CLI command is
+  // never acked, so one that answers nothing is indistinguishable from a node
+  // that has stopped listening. Every path through here replies.
+  bool handleCommand(Client& client, uint32_t timestamp, std::string_view line);
+
   // Round robin from where we stopped, not from the head of the list: otherwise
   // the first client with a bad antenna starves everybody behind it.
   Client* nextClientToPush();
@@ -133,6 +179,16 @@ private:
   bool handleText(const identity::Contact& from, ByteView plain);
   const Post* nextPostFor(const Client& client) const;
   void sendLoginResponse(const PublicKey& to, const Client& client);
+
+  // Commands split off one per verb; the dispatcher stays readable and each one
+  // owns its own reply.
+  void commandClock(const PublicKey& to, std::string_view rest);
+  void commandSet(const PublicKey& to, std::string_view rest);
+  void commandGet(const PublicKey& to, std::string_view rest);
+  void commandClear(const PublicKey& to, std::string_view rest);
+  void sendCliReply(const PublicKey& to, std::string_view text);
+  void replyf(const PublicKey& to, const char* format, ...);
+
   uint32_t sanitiseTimestamp(uint32_t claimed) const;
   bool writeState(const std::string& path) const;
   bool readState(const std::string& path);

@@ -50,6 +50,16 @@ bool SystemClock::wallLooksSynced(uint32_t seconds)
   return seconds > 1577836800u;
 }
 
+bool SystemClock::setWall(uint32_t seconds)
+{
+  if (!wallLooksSynced(seconds)) return false;
+
+  struct timespec ts;
+  ts.tv_sec = (time_t)seconds;
+  ts.tv_nsec = 0;
+  return clock_settime(CLOCK_REALTIME, &ts) == 0;
+}
+
 // store
 
 FileStore::FileStore(std::string directory)
@@ -63,9 +73,8 @@ std::string FileStore::pathFor(std::string_view key) const
   return directory_ + "/" + std::string(key) + ".dat";
 }
 
-std::optional<std::vector<uint8_t>> FileStore::read(std::string_view key)
+static std::optional<std::vector<uint8_t>> readAll(const std::string& path)
 {
-  const std::string path = pathFor(key);
   int fd = ::open(path.c_str(), O_RDONLY);
   if (fd < 0) return std::nullopt;
 
@@ -90,9 +99,16 @@ std::optional<std::vector<uint8_t>> FileStore::read(std::string_view key)
   return data;
 }
 
-bool FileStore::write(std::string_view key, ByteView data)
+std::optional<std::vector<uint8_t>> FileStore::read(std::string_view key)
 {
-  const std::string target = pathFor(key);
+  return readAll(pathFor(key));
+}
+
+// Temporary file, fsync, rename, fsync the directory. Shared by the store and
+// the overlay because getting one of those four steps wrong costs a file, and
+// two copies of it would drift.
+static bool writeAtomic(const std::string& target, const std::string& directory, ByteView data)
+{
   const std::string temporary = target + ".tmp";
 
   int fd = ::open(temporary.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0600);
@@ -120,12 +136,17 @@ bool FileStore::write(std::string_view key, ByteView data)
   }
 
   // The rename itself has to reach the disk, not only the contents.
-  int dirFd = ::open(directory_.c_str(), O_RDONLY | O_DIRECTORY);
+  int dirFd = ::open(directory.c_str(), O_RDONLY | O_DIRECTORY);
   if (dirFd >= 0) {
     fsync(dirFd);
     close(dirFd);
   }
   return true;
+}
+
+bool FileStore::write(std::string_view key, ByteView data)
+{
+  return writeAtomic(pathFor(key), directory_, data);
 }
 
 std::optional<std::vector<uint8_t>> MemoryStore::read(std::string_view key)
@@ -211,6 +232,86 @@ static bool flatten(const Json& node,
   return true;
 }
 
+// overlay
+
+Overlay::Overlay(std::string path)
+  : path_(std::move(path))
+{
+}
+
+bool Overlay::load()
+{
+  // Never written to means nothing was ever changed over the air, which is the
+  // state of every node that has just been installed.
+  if (access(path_.c_str(), F_OK) != 0) {
+    values_.clear();
+    return true;
+  }
+
+  auto blob = readAll(path_);
+  if (!blob.has_value()) return false;
+
+  const Json document = Json::parse(blob->begin(), blob->end(), nullptr, false, false);
+  if (document.is_discarded() || !document.is_object()) return false;
+
+  // Through the same flattener as the config, so `{"room.name": x}` and
+  // `{"room": {"name": x}}` both land on the key they look like.
+  std::map<std::string, std::string> values;
+  std::map<std::string, std::vector<std::string>> lists;
+  if (!flatten(document, std::string(), values, lists)) return false;
+
+  values_ = std::move(values);
+  return true;
+}
+
+std::optional<std::string> Overlay::get(std::string_view key) const
+{
+  auto found = values_.find(std::string(key));
+  if (found == values_.end()) return std::nullopt;
+  return found->second;
+}
+
+bool Overlay::set(std::string_view key, std::string_view value)
+{
+  const std::string name(key);
+  auto previous = values_.find(name);
+  const bool existed = previous != values_.end();
+  const std::string restore = existed ? previous->second : std::string();
+
+  values_[name] = std::string(value);
+  if (save()) return true;
+
+  // Put back what was there. The caller is about to tell an admin the setting
+  // is in force, and it must not end up in force in memory alone.
+  if (existed) {
+    values_[name] = restore;
+  }
+  else {
+    values_.erase(name);
+  }
+  return false;
+}
+
+bool Overlay::save() const
+{
+  Json document = Json::object();
+  for (const auto& [key, value] : values_) {
+    document[key] = value;
+  }
+  // Indented and newline-terminated: the point of this file is that a person
+  // can read it and delete it.
+  const std::string text = document.dump(2) + "\n";
+
+  const size_t slash = path_.find_last_of('/');
+  const std::string directory = slash == std::string::npos ? std::string(".") :
+    slash == 0                                             ? std::string("/") :
+                                                             path_.substr(0, slash);
+
+  return writeAtomic(path_, directory, ByteView { (const uint8_t*)text.data(), text.size() });
+}
+
+// config
+
 bool Config::loadFromString(std::string_view text)
 {
   const Json document = Json::parse(text, nullptr, false, false);
@@ -244,6 +345,17 @@ bool Config::loadFile(const std::string& path)
 bool Config::has(std::string_view key) const
 {
   return values_.find(std::string(key)) != values_.end();
+}
+
+void Config::applyOverlay(const Overlay& overlay)
+{
+  for (const auto& [key, value] : overlay.values()) {
+    values_[key] = value;
+
+    // A scalar shadowing a list has to take the list with it, or getList would
+    // keep answering with the one from the config file.
+    lists_.erase(key);
+  }
 }
 
 std::string Config::get(std::string_view key, std::string_view fallback) const
