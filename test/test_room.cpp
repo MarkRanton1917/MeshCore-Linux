@@ -52,7 +52,16 @@ public:
     return sent.back().id;
   }
 
+  void sendFlood(packet::PayloadType type, ByteView payload) override
+  {
+    Outgoing item;
+    item.type = type;
+    item.payload.assign(payload.begin(), payload.end());
+    flooded.push_back(std::move(item));
+  }
+
   std::vector<Outgoing> sent;
+  std::vector<Outgoing> flooded;
   routing::SendId nextId = 1;
 };
 
@@ -706,6 +715,107 @@ static void testRequests()
   that("a truncated request is ignored", sent.empty());
 }
 
+// A channel is a key, not a roster: anyone holding it can post and nobody
+// signs anything. So what arrives may become a post and nothing else, and what
+// the board receives directly goes back out so the two do not drift apart.
+static void testChannels()
+{
+  section("room: channels");
+
+  crypto::core::SharedSecret secret;
+  for (size_t i = 0; i < PACKET_SHARED_SECRET_SIZE; i++)
+    secret.span()[i] = (uint8_t)(i + 1);
+
+  room::Channel channel;
+  channel.name = "public";
+  channel.secret = secret;
+  channel.hash = room::channelHashOf(secret);
+
+  room::Config config = defaultConfig();
+  config.channels.push_back(channel);
+
+  Fixture fixture(config);
+  auto& room = fixture.roomInstance;
+  auto& flooded = fixture.sender.flooded;
+
+  that("the hash comes from the key alone", room::channelHashOf(secret) == channel.hash);
+
+  // Wrap a text message the way a member would.
+  auto seal = [&](const crypto::core::SharedSecret& key, uint8_t hash, const std::string& text) {
+    auto plain = textPayload(10000, room::TextType::PLAIN, text);
+    std::vector<uint8_t> cipher(MAX_PACKET_PAYLOAD);
+    auto sealed =
+      crypto::protocol::seal(key, ByteView { plain.data(), plain.size() }, ByteSpan { cipher.data(), cipher.size() });
+
+    packet::GroupMsg group;
+    group.channelHash = hash;
+    group.cipherMac = sealed->mac.view();
+    group.ciphertext = ByteView { cipher.data(), sealed->ciphertextLength };
+
+    std::vector<uint8_t> payload(MAX_PACKET_PAYLOAD);
+    auto size = packet::encodeGroup(group, ByteSpan { payload.data(), payload.size() });
+    payload.resize(size ? *size : 0);
+    return payload;
+  };
+
+  auto message = seal(secret, channel.hash, "from the channel");
+  room.onGroup(packet::PayloadType::GRP_TXT, ByteView { message.data(), message.size() });
+  that("a channel message becomes a post", room.postCount() == 1);
+  that("with its text", room.postCount() == 1 && room.posts()[0].text == "from the channel");
+  that("and no author, so nobody is excluded from it",
+    room.postCount() == 1 && room.posts()[0].author == std::array<uint8_t, POST_AUTHOR_PREFIX> {});
+  that("it is not echoed back to the channel it came from", flooded.empty());
+
+  // Right hash, wrong key: the MAC is what actually decides.
+  crypto::core::SharedSecret impostor;
+  for (size_t i = 0; i < PACKET_SHARED_SECRET_SIZE; i++)
+    impostor.span()[i] = (uint8_t)(0xF0 + i);
+  auto forged = seal(impostor, channel.hash, "not a member");
+  room.onGroup(packet::PayloadType::GRP_TXT, ByteView { forged.data(), forged.size() });
+  that("a wrong key is refused even on the right hash", room.postCount() == 1);
+
+  auto elsewhere = seal(secret, (uint8_t)(channel.hash + 1), "another channel");
+  room.onGroup(packet::PayloadType::GRP_TXT, ByteView { elsewhere.data(), elsewhere.size() });
+  that("another channel's hash is ignored", room.postCount() == 1);
+
+  room.onGroup(packet::PayloadType::GRP_DATA, ByteView { message.data(), message.size() });
+  that("GRP_DATA is not text and is left alone", room.postCount() == 1);
+
+  std::vector<uint8_t> rubbish { 0x01, 0x02 };
+  room.onGroup(packet::PayloadType::GRP_TXT, ByteView { rubbish.data(), rubbish.size() });
+  that("a truncated group message is ignored", room.postCount() == 1);
+
+  // A post that came in over a login goes out to the channel.
+  const core::PublicKey author = keyOf(0x11);
+  auto login = loginPayload(1000, 0, "guest");
+  room.onAnon(author, ByteView { login.data(), login.size() });
+  auto post = textPayload(10001, room::TextType::PLAIN, "from a client");
+  room.onPayload(contactOf(author), packet::PayloadType::TXT_MSG, ByteView { post.data(), post.size() });
+
+  that("a direct post is published to the channel", flooded.size() == 1);
+  that("as GRP_TXT", flooded.size() == 1 && flooded[0].type == packet::PayloadType::GRP_TXT);
+
+  // And a member can read it back with the channel key.
+  auto sentOut = packet::decodeGroup(ByteView { flooded[0].payload.data(), flooded[0].payload.size() });
+  that("it carries our channel hash", sentOut && sentOut->channelHash == channel.hash);
+
+  crypto::protocol::Mac mac;
+  if (sentOut) std::memcpy(mac.data.data(), sentOut->cipherMac.data(), PACKET_MAC_SIZE);
+  std::vector<uint8_t> plain(MAX_PACKET_PAYLOAD);
+  auto length = sentOut ?
+    crypto::protocol::open(secret, mac, sentOut->ciphertext, ByteSpan { plain.data(), plain.size() }) :
+    std::nullopt;
+  auto readBack = length ? packet::decodeText(ByteView { plain.data(), *length }) : std::nullopt;
+  that("a member decrypts it",
+    readBack && std::string((const char*)readBack->message.data(), readBack->message.size()) == "from a client");
+
+  // A room with no channels floods nothing at all.
+  Fixture bare(defaultConfig());
+  bare.roomInstance.onAnon(author, ByteView { login.data(), login.size() });
+  bare.roomInstance.onPayload(contactOf(author), packet::PayloadType::TXT_MSG, ByteView { post.data(), post.size() });
+  that("no channels means no flood", bare.sender.flooded.empty());
+}
+
 static void testCommands()
 {
   section("room: admin commands");
@@ -933,6 +1043,7 @@ int main()
   testPersistence();
   testSameSecondPosts();
   testRequests();
+  testChannels();
   testCommands();
   testSettingsReachTheHost();
 

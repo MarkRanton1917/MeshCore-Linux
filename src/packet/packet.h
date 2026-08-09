@@ -128,6 +128,17 @@ struct Envelope {
   ByteView ciphertext;
 };
 
+// GRP_TXT / GRP_DATA: channelHash(1) cipherMac(2) ciphertext(rest).
+//
+// Like an envelope but with one hash instead of two, and for the same reason
+// there is only one: a channel message is addressed to whoever holds the key,
+// not to a node. Nobody signs it either — the key is the whole membership test.
+struct GroupMsg {
+  uint8_t channelHash = 0;
+  ByteView cipherMac;
+  ByteView ciphertext;
+};
+
 // PATH: pathLength(1) path(n, one byte per hash) extraType(1) extra(rest).
 struct PathReturn {
   ByteView path;
@@ -170,6 +181,10 @@ std::optional<size_t> encodeLoginResponse(const LoginResponse& r, ByteSpan out);
 // Addressed envelope — every direct payload type wears it.
 std::optional<Envelope> decodeEnvelope(ByteView payload);
 std::optional<size_t> encodeEnvelope(const Envelope& e, ByteSpan out);
+
+// Channel traffic — anyone holding the key, which is nobody in routing.
+std::optional<GroupMsg> decodeGroup(ByteView payload);
+std::optional<size_t> encodeGroup(const GroupMsg& g, ByteSpan out);
 
 // Returned path — room server as the end node.
 std::optional<PathReturn> decodePath(ByteView payload);

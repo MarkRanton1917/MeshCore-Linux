@@ -54,6 +54,15 @@ struct Delegate {
   // contact yet, so there is no contact to hand over — only the raw key.
   virtual void onAnon(const PublicKey& from, ByteView plain) = 0;
 
+  // Channel traffic, handed up as it came off the air. routing holds no channel
+  // keys and cannot tell whether this one is even addressed to us, so it does
+  // not try: the layer that holds the key decides by whether the MAC checks out.
+  virtual void onGroup(packet::PayloadType type, ByteView payload)
+  {
+    (void)type;
+    (void)payload;
+  }
+
   virtual void onAck(SendId id) = 0;
   virtual void onDeliveryFailed(SendId id) = 0;
 

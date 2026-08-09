@@ -189,6 +189,12 @@ void Router::onFrame(ByteView frame, RxMeta meta)
     // Unaddressed and unencrypted. Verifying and remembering it belongs to the
     // layer above; here it only gets forwarded.
     break;
+  case packet::PayloadType::GRP_TXT:
+  case packet::PayloadType::GRP_DATA:
+    // Addressed to a key rather than to a node, so there is no destination hash
+    // to match and nothing here can open it.
+    delegate_.onGroup(parsed->payloadType(), payload);
+    break;
   default:
     deliverToSelf(*parsed, payload);
     break;

@@ -20,7 +20,7 @@ Dependencies point downward only; no module names the one above it.
 | [crypto/protocol](src/crypto/protocol.h) | MeshCore-specific constructions built from those primitives. | core, packet |
 | [identity](src/identity/) | Our keypair and the contacts learned from adverts, plus a shared-secret cache. | core, packet |
 | [routing](src/routing/) | Flood and direct routing, deduplication, path learning, acks and retries. | identity, packet, protocol |
-| [room](src/room/) | The noticeboard: posts, clients, logins, access control, per-client sync. | identity, routing |
+| [room](src/room/) | The noticeboard: posts, clients, logins, access control, per-client sync, channels. | identity, routing, protocol |
 | [radio](src/radio/) | Airtime, duty cycle, TX queue, and the drivers. The only module that would know about SPI. | platform |
 | [platform](src/platform/) | Clock, file store, config, logging — the only system calls in the tree. | — |
 | [telemetry](src/telemetry/) | Event bus and counters. Switchable off with a flag; nothing else notices. | platform |
@@ -89,6 +89,7 @@ Configuration is [meshcore.json](meshcore.json); every key has a default:
 | `radio.duty_cycle` | Percent per sliding hour (10 on 868 MHz in Europe) |
 | `room.admin_password`, `room.guest_password` | Empty means that role cannot log in |
 | `room.anonymous_read` | Let strangers read without a password |
+| `room.channels` | `"name:key"` each, the key 64 hex characters. Up to four |
 | `telemetry.enabled`, `telemetry.queue`, `telemetry.report_ms` | Event ring and reporting interval |
 
 ### Admin commands
@@ -115,6 +116,28 @@ resends the identical frame.
 | `get name`, `get time` | Read one value back |
 | `clear posts` | Empties the noticeboard, leaving the clients' bookmarks alone |
 | `reboot` | Exits after the reply is on its way; the supervisor restarts the process |
+
+### Channels
+
+A channel is a key and a name, configured as one string per channel:
+
+```json
+"room": { "channels": ["public:000102...1f"] }
+```
+
+Anyone holding the key is a member. There is no roster, no login and no
+signature, so a channel message may only ever become a post — it can never log
+anybody in, carry a command, or move a client's bookmark. What the board
+receives from a logged-in client goes back out to every channel, so the two do
+not drift apart; what arrives on a channel is never sent back to one, which is
+where the loop would be.
+
+The channel hash on air is the first byte of `SHA-256(key)`, so both ends derive
+it without being told. One byte is ambiguous by design, the same as a node hash:
+every channel with a matching byte is tried and the MAC decides.
+
+`routing` holds no channel keys and does not try to guess whether a group
+message is for this node — it hands every one of them up and forwards them all.
 
 ### The overlay
 

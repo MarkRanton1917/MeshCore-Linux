@@ -44,6 +44,7 @@
 #define ANON_REQ_PREFIX_SIZE (NODE_HASH_SIZE + PACKET_PUBLIC_KEY_SIZE + PACKET_MAC_SIZE)
 #define PATH_EXTRA_TYPE_SIZE 1
 #define ENVELOPE_PREFIX_SIZE (NODE_HASH_SIZE * 2 + PACKET_MAC_SIZE)
+#define GROUP_PREFIX_SIZE (NODE_HASH_SIZE + PACKET_MAC_SIZE)
 #define LOGIN_RESPONSE_NONCE_SIZE 4
 
 // Advert appdata: low four bits of the flags byte are the node type, the high
@@ -70,6 +71,11 @@
 #define MAX_ROOM_CLIENTS 64
 #define MAX_PASSWORD 32
 #define MAX_NODE_NAME 32
+
+// Channels. A handful: each one costs a flood per post, and the airtime budget
+// runs out long before the memory does.
+#define MAX_CHANNELS 4
+#define MAX_CHANNEL_NAME 32
 
 // Version 2 gave posts a sequence number of their own; version 1 files are read
 // and upgraded, their timestamp bookmarks converted on the way in.

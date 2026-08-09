@@ -86,6 +86,13 @@ public:
     anonPlain.assign(plain.begin(), plain.end());
     anonCount++;
   }
+  void onGroup(packet::PayloadType type, ByteView payload) override
+  {
+    Received item;
+    item.type = type;
+    item.plain.assign(payload.begin(), payload.end());
+    groups.push_back(std::move(item));
+  }
   void onAck(routing::SendId id) override
   {
     acked.push_back(id);
@@ -101,6 +108,7 @@ public:
   }
 
   std::vector<Received> payloads;
+  std::vector<Received> groups;
   std::vector<routing::SendId> acked;
   std::vector<routing::SendId> failed;
   core::PublicKey anonFrom;
@@ -505,6 +513,44 @@ static void testAnonRequest()
   that("a bystander ignores it", other.node(bystander).delegate.anonCount == 0);
 }
 
+// Channel traffic is addressed to a key, not to a node. routing holds no
+// channel keys, so it cannot say whether a group message is for this node and
+// does not try: everyone who hears it gets it handed up, and everyone forwards.
+static void testGroupDelivery()
+{
+  section("routing: group messages");
+
+  Network net;
+  const size_t sender = net.add(), r = net.add(), listener = net.add();
+  net.link(sender, r);
+  net.link(r, listener);
+  net.introduceAll();
+
+  std::vector<uint8_t> payload { 0x7C, 0xAA, 0xBB, 1, 2, 3, 4 }; // hash, mac, ciphertext
+  net.node(sender).router->sendFlood(packet::PayloadType::GRP_TXT, ByteView { payload.data(), payload.size() });
+  net.run(3000);
+
+  that("the listener was handed it", net.node(listener).delegate.groups.size() == 1);
+  that("as GRP_TXT",
+    net.node(listener).delegate.groups.size() == 1
+      && net.node(listener).delegate.groups[0].type == packet::PayloadType::GRP_TXT);
+  that("payload passed through untouched",
+    net.node(listener).delegate.groups.size() == 1 && net.node(listener).delegate.groups[0].plain == payload);
+
+  // The repeater in the middle holds no key either, and hands it up all the
+  // same — deciding is the job of whoever can open it.
+  that("the repeater got it too", net.node(r).delegate.groups.size() == 1);
+  that("and it never looked like an addressed payload", net.node(listener).delegate.payloads.empty());
+
+  bool forwarded = false;
+  for (const auto& [source, transmitted] : net.transmitted) {
+    if (source != r) continue;
+    auto parsed = packet::parse(ByteView { transmitted.frame.data(), transmitted.frame.size() });
+    if (parsed && parsed->payloadType() == packet::PayloadType::GRP_TXT) forwarded = true;
+  }
+  that("and passed it on", forwarded);
+}
+
 static void testForwardingPolicy()
 {
   section("routing: shouldForward is the only policy hook");
@@ -539,6 +585,7 @@ int main()
   testRepeatersDoNotCollide();
   testEndpointStillForwards();
   testAnonRequest();
+  testGroupDelivery();
   testForwardingPolicy();
 
   return check::report();

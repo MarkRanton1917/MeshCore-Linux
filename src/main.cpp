@@ -129,6 +129,11 @@ public:
     return router_->sendDirect(to, type, payload, wantAck);
   }
 
+  void sendFlood(packet::PayloadType type, ByteView payload) override
+  {
+    if (router_ != nullptr) router_->sendFlood(type, payload);
+  }
+
 private:
   routing::Router* router_ = nullptr;
 };
@@ -271,6 +276,51 @@ uint32_t usedPermilleOf(const radio::IRadio& device)
   return 0;
 }
 
+// Config entries read "name:hex", the key being 32 bytes as 64 hex characters.
+// One string per channel rather than an object, because the config parser
+// flattens objects to text and refuses an array of them.
+std::vector<room::Channel> channelsFrom(const std::vector<std::string>& entries)
+{
+  std::vector<room::Channel> channels;
+
+  for (const std::string& entry : entries) {
+    const size_t colon = entry.find(':');
+    if (colon == std::string::npos) {
+      platform::Log::write(platform::LogLevel::ERROR, "channel '%s' is not name:key", entry.c_str());
+      continue;
+    }
+
+    const std::string name = entry.substr(0, colon);
+    const std::string hex = entry.substr(colon + 1);
+    if (name.empty() || name.size() > MAX_CHANNEL_NAME || hex.size() != PACKET_SHARED_SECRET_SIZE * 2) {
+      platform::Log::write(platform::LogLevel::ERROR, "channel '%s' needs a name and %d hex characters", name.c_str(),
+        PACKET_SHARED_SECRET_SIZE * 2);
+      continue;
+    }
+
+    room::Channel channel;
+    channel.name = name;
+    bool ok = true;
+    for (size_t i = 0; i < PACKET_SHARED_SECRET_SIZE && ok; i++) {
+      unsigned byte = 0;
+      if (std::sscanf(hex.c_str() + i * 2, "%2x", &byte) != 1) ok = false;
+      channel.secret.span()[i] = (uint8_t)byte;
+    }
+    if (!ok) {
+      platform::Log::write(platform::LogLevel::ERROR, "channel '%s' has a bad key", name.c_str());
+      continue;
+    }
+
+    channel.hash = room::channelHashOf(channel.secret);
+    if (channels.size() >= MAX_CHANNELS) {
+      platform::Log::write(platform::LogLevel::WARN, "more than %d channels, '%s' ignored", MAX_CHANNELS, name.c_str());
+      break;
+    }
+    channels.push_back(std::move(channel));
+  }
+  return channels;
+}
+
 platform::LogLevel levelFromName(const std::string& name)
 {
   if (name == "error") return platform::LogLevel::ERROR;
@@ -396,6 +446,10 @@ int main(int argc, char** argv)
   roomConfig.allowAnonymousRead = config.getBool("room.anonymous_read", false);
   roomConfig.bus = telemetryOn ? &bus : nullptr;
   roomConfig.admin = &admin;
+  roomConfig.channels = channelsFrom(config.getList("room.channels"));
+  for (const room::Channel& channel : roomConfig.channels) {
+    platform::Log::write(platform::LogLevel::INFO, "channel '%s', hash %02x", channel.name.c_str(), channel.hash);
+  }
 
   room::Room room(store, sender, roomConfig);
   if (!room.load(dataDir)) {

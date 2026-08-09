@@ -17,6 +17,7 @@
 using namespace room;
 
 namespace core = crypto::core;
+namespace protocol = crypto::protocol;
 
 // Login response body, ours to define — the protocol calls a RESPONSE payload
 // application data:
@@ -317,6 +318,11 @@ bool Room::handleText(const identity::Contact& from, ByteView plain)
 
     const std::string_view text((const char*)message->message.data(), message->message.size());
     addPost(from.pk, message->timestamp, text);
+
+    // Out to the channels as well, or somebody reading over the channel and
+    // somebody logged in would be looking at two different boards. Only from
+    // here: a post that came in on a channel is never sent back to one.
+    publishToChannels(posts_.back());
     return true;
   }
   case TextType::CLI: {
@@ -349,6 +355,83 @@ bool Room::shouldForward(const packet::Packet& p)
 {
   (void)p;
   return true;
+}
+
+// ------------------------------------------------------------------ channels
+
+uint8_t room::channelHashOf(const core::SharedSecret& secret)
+{
+  return core::sha256(secret.view()).data[0];
+}
+
+// Anyone holding the key can send this, and nothing in it is signed. So a
+// channel message may only ever become a post: it can never log anybody in,
+// carry a command, or move a client's bookmark.
+void Room::onGroup(packet::PayloadType type, ByteView payload)
+{
+  if (type != packet::PayloadType::GRP_TXT) return;
+
+  auto group = packet::decodeGroup(payload);
+  if (!group.has_value()) return;
+
+  for (const Channel& channel : config_.channels) {
+    // One byte of hash is ambiguous on purpose, so every candidate is tried and
+    // the MAC settles it — the same rule as a node hash.
+    if (channel.hash != group->channelHash) continue;
+
+    protocol::Mac mac;
+    std::memcpy(mac.data.data(), group->cipherMac.data(), PACKET_MAC_SIZE);
+
+    std::vector<uint8_t> plain(group->ciphertext.size());
+    auto length = protocol::open(channel.secret, mac, group->ciphertext, ByteSpan { plain.data(), plain.size() });
+    if (!length.has_value()) continue; // not this channel, or damaged
+
+    auto message = packet::decodeText(ByteView { plain.data(), *length });
+    if (!message.has_value()) return;
+    if ((TextType)message->txtType != TextType::PLAIN) return;
+
+    // No author key exists — the key is the whole membership test, and who
+    // typed it is only ever whatever the text says. A zeroed prefix matches no
+    // client, so the post goes out to everybody including the sender's
+    // neighbours, which on a channel is the point.
+    const PublicKey anonymous {};
+    const std::string_view text((const char*)message->message.data(), message->message.size());
+    addPost(anonymous, message->timestamp, text);
+    return;
+  }
+}
+
+void Room::publishToChannels(const Post& post)
+{
+  if (config_.channels.empty()) return;
+
+  packet::TextMsg message;
+  message.timestamp = post.timestamp;
+  message.txtType = (uint8_t)TextType::PLAIN;
+  message.attempt = 0;
+  message.message = ByteView { (const uint8_t*)post.text.data(), post.text.size() };
+
+  std::vector<uint8_t> plain(MAX_PACKET_PAYLOAD);
+  auto plainSize = packet::encodeText(message, ByteSpan { plain.data(), plain.size() });
+  if (!plainSize.has_value()) return;
+
+  for (const Channel& channel : config_.channels) {
+    std::vector<uint8_t> cipher(MAX_PACKET_PAYLOAD);
+    auto sealed =
+      protocol::seal(channel.secret, ByteView { plain.data(), *plainSize }, ByteSpan { cipher.data(), cipher.size() });
+    if (!sealed.has_value()) continue;
+
+    packet::GroupMsg group;
+    group.channelHash = channel.hash;
+    group.cipherMac = sealed->mac.view();
+    group.ciphertext = ByteView { cipher.data(), sealed->ciphertextLength };
+
+    std::vector<uint8_t> payload(MAX_PACKET_PAYLOAD);
+    auto payloadSize = packet::encodeGroup(group, ByteSpan { payload.data(), payload.size() });
+    if (!payloadSize.has_value()) continue;
+
+    sender_.sendFlood(packet::PayloadType::GRP_TXT, ByteView { payload.data(), *payloadSize });
+  }
 }
 
 // ------------------------------------------------------------------ commands

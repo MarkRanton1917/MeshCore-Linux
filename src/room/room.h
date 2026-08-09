@@ -29,7 +29,27 @@ using routing::SendId;
 struct Sender {
   virtual ~Sender() = default;
   virtual SendId sendDirect(const PublicKey& to, packet::PayloadType type, ByteView payload, bool wantAck) = 0;
+
+  // Channel traffic goes to nobody in particular, so it floods. There is no ack
+  // to wait for and no route to learn: whoever holds the key and hears it, has
+  // it, and whoever does not is not counted.
+  virtual void sendFlood(packet::PayloadType type, ByteView payload) = 0;
 };
+
+// A channel is a key and a name. Anyone holding the key is a member — there is
+// no roster, no login and no signature, which is exactly why a channel post is
+// never trusted with anything a client login guards.
+struct Channel {
+  std::string name;
+  crypto::core::SharedSecret secret;
+
+  // Which channel a message belongs to, one byte, ambiguous by design like a
+  // node hash. Collisions are settled by whose MAC checks out.
+  uint8_t hash = 0;
+};
+
+// Derives the on-air hash from the key, so both ends agree without being told.
+uint8_t channelHashOf(const crypto::core::SharedSecret& secret);
 
 // What a command needs and the room does not own: the radio, the system clock
 // and the process itself all sit above it. Optional like the bus — with no host
@@ -127,6 +147,11 @@ struct Config {
   Millis retryDelay = 5000;
   uint16_t firmwareVersion = 1;
 
+  // Channels this room listens on. What arrives goes onto the board; what is
+  // posted to the board goes back out to every one of them, so the channel and
+  // the noticeboard do not drift apart.
+  std::vector<Channel> channels;
+
   // Optional, same rule as routing: room publishes, never calls telemetry.
   telemetry::Bus* bus = nullptr;
 
@@ -147,6 +172,7 @@ public:
   // ---- routing::Delegate
   void onAnon(const PublicKey& from, ByteView plain) override;
   void onPayload(const identity::Contact& from, packet::PayloadType type, ByteView plain) override;
+  void onGroup(packet::PayloadType type, ByteView payload) override;
   void onAck(SendId id) override;
   void onDeliveryFailed(SendId id) override;
   bool shouldAck(packet::PayloadType type, ByteView plain) override;
@@ -197,6 +223,11 @@ public:
 private:
   bool handleText(const identity::Contact& from, ByteView plain);
   bool handleRequest(Client& client, ByteView plain);
+
+  // Only for a post somebody sent us directly. A post that arrived on a channel
+  // is never sent back to one — that is the loop, and it does not stop.
+  void publishToChannels(const Post& post);
+
   void sendStatusResponse(const Client& client, RequestType type);
 
   const Post* nextPostFor(const Client& client) const;

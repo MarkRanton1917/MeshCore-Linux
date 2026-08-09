@@ -245,6 +245,32 @@ std::optional<packet::Envelope> packet::decodeEnvelope(ByteView payload)
   return envelope;
 }
 
+std::optional<packet::GroupMsg> packet::decodeGroup(ByteView payload)
+{
+  if (payload.size() < GROUP_PREFIX_SIZE) return std::nullopt;
+
+  GroupMsg group;
+  group.channelHash = payload[0];
+  group.cipherMac = payload.subspan(NODE_HASH_SIZE, PACKET_MAC_SIZE);
+  group.ciphertext = payload.subspan(GROUP_PREFIX_SIZE);
+  return group;
+}
+
+std::optional<size_t> packet::encodeGroup(const GroupMsg& g, ByteSpan out)
+{
+  if (g.cipherMac.size() != PACKET_MAC_SIZE) return std::nullopt;
+
+  const size_t total = GROUP_PREFIX_SIZE + g.ciphertext.size();
+  if (total > MAX_PACKET_PAYLOAD || out.size() < total) return std::nullopt;
+
+  out[0] = g.channelHash;
+  memcpy(out.data() + NODE_HASH_SIZE, g.cipherMac.data(), PACKET_MAC_SIZE);
+  if (!g.ciphertext.empty()) {
+    memcpy(out.data() + GROUP_PREFIX_SIZE, g.ciphertext.data(), g.ciphertext.size());
+  }
+  return total;
+}
+
 std::optional<size_t> packet::encodeEnvelope(const Envelope& e, ByteSpan out)
 {
   if (e.cipherMac.size() != PACKET_MAC_SIZE) return std::nullopt;

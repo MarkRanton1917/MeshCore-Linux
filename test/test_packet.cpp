@@ -358,6 +358,52 @@ static void testPathCodec()
   that("path of exactly 64 fits", atLimit && *atLimit == 1 + MAX_PATH_SIZE + 1 + extra.size());
 }
 
+static void testGroupCodec()
+{
+  section("codec: group");
+
+  std::vector<uint8_t> out(MAX_PACKET_PAYLOAD);
+  ByteSpan sink { out.data(), out.size() };
+  std::vector<uint8_t> mac { 0xAA, 0xBB };
+  std::vector<uint8_t> cipher(16, 0x5A);
+
+  packet::GroupMsg group;
+  group.channelHash = 0x7C;
+  group.cipherMac = view(mac);
+  group.ciphertext = view(cipher);
+
+  auto written = packet::encodeGroup(group, sink);
+  that("encodes to 1 + 2 + ciphertext", written && *written == GROUP_PREFIX_SIZE + cipher.size());
+  that("the channel hash leads", out[0] == 0x7C && out[1] == 0xAA && out[3] == 0x5A);
+
+  auto decoded = packet::decodeGroup(ByteView { out.data(), *written });
+  that("round-trip",
+    decoded && decoded->channelHash == 0x7C && decoded->cipherMac.size() == PACKET_MAC_SIZE
+      && decoded->cipherMac[1] == 0xBB && decoded->ciphertext.size() == cipher.size());
+
+  // One hash short of an envelope: the two must not be confused for each other.
+  that("a group message is shorter than an envelope by one hash",
+    GROUP_PREFIX_SIZE + NODE_HASH_SIZE == ENVELOPE_PREFIX_SIZE);
+
+  std::vector<uint8_t> none;
+  group.ciphertext = view(none);
+  auto bare = packet::encodeGroup(group, sink);
+  that("empty ciphertext is just the prefix", bare && *bare == GROUP_PREFIX_SIZE);
+
+  std::vector<uint8_t> shortMac { 0x01 };
+  group.cipherMac = view(shortMac);
+  that("a mac of the wrong size is refused", !packet::encodeGroup(group, sink));
+
+  std::vector<uint8_t> tooShort { 0x7C, 0xAA };
+  that("a payload shorter than the prefix", !packet::decodeGroup(view(tooShort)));
+  that("an empty payload", !packet::decodeGroup(ByteView {}));
+
+  group.cipherMac = view(mac);
+  std::vector<uint8_t> huge(MAX_PACKET_PAYLOAD, 0);
+  group.ciphertext = view(huge);
+  that("over one frame is refused", !packet::encodeGroup(group, sink));
+}
+
 int main()
 {
   testParseRejects();
@@ -370,5 +416,6 @@ int main()
   testAnonReqCodec();
   testLoginResponseCodec();
   testPathCodec();
+  testGroupCodec();
   return check::report();
 }
