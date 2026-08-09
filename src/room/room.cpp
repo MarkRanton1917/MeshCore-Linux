@@ -25,6 +25,9 @@ namespace core = crypto::core;
 static constexpr size_t kResponseSize = 4 + 1 + 1 + 1 + 1 + 4 + 2;
 static constexpr uint8_t kResponseOk = 0;
 
+// Status reply to a REQ, laid out where sendStatusResponse builds it.
+static constexpr size_t kStatusSize = 4 + 1 + 1 + 1 + 1 + 1 + 1 + 4 + 2;
+
 static uint32_t readUint32(ByteView view, size_t offset)
 {
   return (uint32_t)view[offset] | (uint32_t)view[offset + 1] << 8 | (uint32_t)view[offset + 2] << 16
@@ -209,8 +212,95 @@ void Room::sendLoginResponse(const PublicKey& to, const Client& client)
 
 void Room::onPayload(const identity::Contact& from, packet::PayloadType type, ByteView plain)
 {
-  if (type != packet::PayloadType::TXT_MSG) return;
-  handleText(from, plain);
+  switch (type) {
+  case packet::PayloadType::TXT_MSG:
+    handleText(from, plain);
+    return;
+  case packet::PayloadType::REQ: {
+    Client* client = findClient(from.pk);
+    if (client == nullptr) return; // never logged in, answered with silence
+    handleRequest(*client, plain);
+    return;
+  }
+  default:
+    return;
+  }
+}
+
+// REQ plaintext: timestamp(4) type(1) argument(rest).
+//
+// Answered with a RESPONSE and never acked — the response is the receipt, and
+// on a duty-cycled radio two packets where one will do is a quarter of a second
+// of airtime spent on nothing.
+bool Room::handleRequest(Client& client, ByteView plain)
+{
+  if (plain.size() < REQUEST_PREFIX_SIZE) return false;
+
+  const uint32_t timestamp = readUint32(plain, 0);
+  const RequestType type = (RequestType)plain[4];
+
+  // Same rule as commands, and a counter of its own: a keep-alive every minute
+  // must not start refusing the commands typed between them.
+  if (timestamp < client.lastRequest) return false;
+  client.lastRequest = timestamp;
+
+  if (!can(client, Action::READ)) return false;
+
+  switch (type) {
+  case RequestType::KEEP_ALIVE:
+    // The client is awake now, so drop the pause a failed delivery imposed
+    // rather than making it wait out a timer set for a node that was not there.
+    client.retryAfter = 0;
+    sendStatusResponse(client, type);
+    return true;
+  case RequestType::STATUS:
+    sendStatusResponse(client, type);
+    return true;
+  default:
+    return false;
+  }
+}
+
+size_t Room::unreadFor(const Client& client) const
+{
+  size_t count = 0;
+  for (const Post& post : posts_) {
+    if (post.seq <= client.syncSeq) continue;
+    if (std::memcmp(post.author.data(), client.pk.data.data(), POST_AUTHOR_PREFIX) == 0) continue;
+    count++;
+  }
+  return count;
+}
+
+// Status body, ours to define:
+//   serverTime(4) code(1) reqType(1) access(1) posts(1) clients(1) unread(1)
+//   random(4) firmwareVersion(2)
+//
+// reqType sits where the login reply keeps a zero, so a client can tell the two
+// apart from the bytes alone rather than from what it last sent.
+void Room::sendStatusResponse(const Client& client, RequestType type)
+{
+  std::vector<uint8_t> body;
+  body.reserve(kStatusSize);
+
+  writeUint32(body, serverTime_);
+  body.push_back(kResponseOk);
+  body.push_back((uint8_t)type);
+  body.push_back((uint8_t)client.access);
+  body.push_back((uint8_t)std::min<size_t>(posts_.size(), 255));
+  body.push_back((uint8_t)std::min<size_t>(clients_.size(), 255));
+  body.push_back((uint8_t)std::min<size_t>(unreadFor(client), 255));
+
+  // Same reason as the login reply: two identical answers are one packet on
+  // air, and deduplication somewhere in the network swallows the second.
+  std::array<uint8_t, LOGIN_RESPONSE_NONCE_SIZE> nonce {};
+  core::randomBytes(ByteSpan { nonce.data(), nonce.size() });
+  body.insert(body.end(), nonce.begin(), nonce.end());
+
+  body.push_back((uint8_t)(config_.firmwareVersion));
+  body.push_back((uint8_t)(config_.firmwareVersion >> 8));
+
+  sender_.sendDirect(client.pk, packet::PayloadType::RESPONSE, ByteView { body.data(), body.size() }, false);
 }
 
 bool Room::handleText(const identity::Contact& from, ByteView plain)
@@ -246,6 +336,8 @@ bool Room::handleText(const identity::Contact& from, ByteView plain)
 // client retries until it gives up and reports the message as undelivered.
 bool Room::shouldAck(packet::PayloadType type, ByteView plain)
 {
+  // A REQ is answered with a RESPONSE, which is receipt enough.
+  if (type == packet::PayloadType::REQ) return false;
   if (type != packet::PayloadType::TXT_MSG) return true;
 
   auto message = packet::decodeText(plain);

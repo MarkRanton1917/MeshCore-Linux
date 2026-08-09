@@ -160,6 +160,16 @@ static std::vector<uint8_t> textPayload(uint32_t timestamp, room::TextType txtTy
   return out;
 }
 
+// REQ plaintext: timestamp(4) type(1) argument(rest).
+static std::vector<uint8_t> requestPayload(uint32_t timestamp, room::RequestType type)
+{
+  std::vector<uint8_t> out;
+  for (int i = 0; i < 4; i++)
+    out.push_back((uint8_t)(timestamp >> (8 * i)));
+  out.push_back((uint8_t)type);
+  return out;
+}
+
 // A contact standing in for one that identity would have produced.
 static identity::Contact contactOf(const core::PublicKey& pk)
 {
@@ -607,6 +617,95 @@ static void testSameSecondPosts()
   that("and nothing is sent twice", sent.size() == 3);
 }
 
+// A REQ is how a client asks without posting anything: how many unread posts
+// are waiting, and — after a sleep — a nudge to start sending them again.
+static void testRequests()
+{
+  section("room: status requests");
+
+  Fixture fixture(defaultConfig());
+  auto& room = fixture.roomInstance;
+  auto& sent = fixture.sender.sent;
+
+  const core::PublicKey author = keyOf(0x11);
+  const core::PublicKey reader = keyOf(0x22);
+
+  // A stranger gets nothing at all, not even an error.
+  auto early = requestPayload(2000, room::RequestType::STATUS);
+  room.onPayload(contactOf(reader), packet::PayloadType::REQ, ByteView { early.data(), early.size() });
+  that("an unknown client is ignored", sent.empty());
+
+  auto authorLogin = loginPayload(1000, 0, "guest");
+  room.onAnon(author, ByteView { authorLogin.data(), authorLogin.size() });
+  auto readerLogin = loginPayload(1000, 0, "guest");
+  room.onAnon(reader, ByteView { readerLogin.data(), readerLogin.size() });
+  sent.clear();
+
+  room.addPost(author, 10000, "one");
+  room.addPost(author, 10001, "two");
+
+  auto status = requestPayload(2000, room::RequestType::STATUS);
+  room.onPayload(contactOf(reader), packet::PayloadType::REQ, ByteView { status.data(), status.size() });
+
+  that("a status reply went out", sent.size() == 1);
+  that("as a RESPONSE", sent.size() == 1 && sent[0].type == packet::PayloadType::RESPONSE);
+  that("asking for no ack", sent.size() == 1 && !sent[0].wantAck);
+
+  // serverTime(4) code(1) reqType(1) access(1) posts(1) clients(1) unread(1)...
+  const std::vector<uint8_t>& body = sent[0].payload;
+  that("the body is the documented length", body.size() == 16);
+  that("it names the request it answers", body.size() > 5 && body[5] == (uint8_t)room::RequestType::STATUS);
+  that("and carries the rights", body.size() > 6 && body[6] == (uint8_t)room::Access::GUEST);
+  that("post count", body.size() > 7 && body[7] == 2);
+  that("client count", body.size() > 8 && body[8] == 2);
+  that("both posts are unread for the reader", body.size() > 9 && body[9] == 2);
+
+  // The author wrote them, so nothing is waiting for it.
+  sent.clear();
+  room.onPayload(contactOf(author), packet::PayloadType::REQ, ByteView { status.data(), status.size() });
+  that("the author has nothing unread", sent.size() == 1 && sent[0].payload[9] == 0);
+  sent.clear();
+
+  // A REQ must never be acked: the response is the receipt.
+  that("no ack for a REQ", !room.shouldAck(packet::PayloadType::REQ, ByteView { status.data(), status.size() }));
+
+  // Replay: backwards is refused, the same timestamp is answered again.
+  auto older = requestPayload(1999, room::RequestType::STATUS);
+  room.onPayload(contactOf(reader), packet::PayloadType::REQ, ByteView { older.data(), older.size() });
+  that("an older request is dropped", sent.empty());
+
+  room.onPayload(contactOf(reader), packet::PayloadType::REQ, ByteView { status.data(), status.size() });
+  that("the same timestamp is answered again", sent.size() == 1);
+  sent.clear();
+
+  // A keep-alive lifts the pause a failed delivery imposed, so the client that
+  // has just woken up does not wait out a timer set for a node that was away.
+  room.tick(1000);
+  that("a push went out", sent.size() == 1);
+  room.onDeliveryFailed(sent.back().id);
+  sent.clear();
+
+  room.tick(1100);
+  that("held back during the retry pause", sent.empty());
+
+  auto alive = requestPayload(2001, room::RequestType::KEEP_ALIVE);
+  room.onPayload(contactOf(reader), packet::PayloadType::REQ, ByteView { alive.data(), alive.size() });
+  that("the keep-alive is answered", sent.size() == 1);
+
+  room.tick(1200);
+  that("and pushing resumes at once", sent.size() == 2);
+
+  auto unknown = requestPayload(2002, (room::RequestType)0x7F);
+  sent.clear();
+  room.onPayload(contactOf(reader), packet::PayloadType::REQ, ByteView { unknown.data(), unknown.size() });
+  that("an unknown request type is ignored", sent.empty());
+
+  std::vector<uint8_t> truncated = requestPayload(2003, room::RequestType::STATUS);
+  truncated.resize(3);
+  room.onPayload(contactOf(reader), packet::PayloadType::REQ, ByteView { truncated.data(), truncated.size() });
+  that("a truncated request is ignored", sent.empty());
+}
+
 static void testCommands()
 {
   section("room: admin commands");
@@ -833,6 +932,7 @@ int main()
   testRingBuffer();
   testPersistence();
   testSameSecondPosts();
+  testRequests();
   testCommands();
   testSettingsReachTheHost();
 

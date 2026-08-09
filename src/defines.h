@@ -83,5 +83,8 @@
 // Login request plaintext: timestamp(4) syncSince(4) password(rest).
 #define LOGIN_REQUEST_PREFIX_SIZE 8
 
+// REQ plaintext: timestamp(4) type(1) argument(rest).
+#define REQUEST_PREFIX_SIZE 5
+
 using ByteView = std::span<const std::uint8_t>;
 using ByteSpan = std::span<std::uint8_t>;

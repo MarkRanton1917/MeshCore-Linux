@@ -68,6 +68,14 @@ enum class TextType : uint8_t {
   SIGNED = 2 // what the room pushes back out, author prefix and all
 };
 
+// The leading byte of a REQ plaintext. Like the response bodies, these are ours
+// to define: the protocol calls a REQ payload application data and says nothing
+// about what goes in it.
+enum class RequestType : uint8_t {
+  STATUS = 0x01, // how many posts, how many clients, how many unread
+  KEEP_ALIVE = 0x02 // the same, and a nudge to resume pushing straight away
+};
+
 enum class Access : uint8_t {
   NONE = 0,
   READ_ONLY = 1, // only when anonymous reading is allowed
@@ -99,6 +107,7 @@ struct Client {
   uint32_t syncSeq = 0; // everything up to this seq has been handed over
   uint32_t lastLogin = 0; // replay guard for the login packet
   uint32_t lastCommand = 0; // and for commands, which are worth replaying
+  uint32_t lastRequest = 0; // and for REQs, kept apart so one cannot block the other
   bool pending = false;
   SendId pendingId = 0;
   uint32_t pendingSeq = 0; // seq of the post in flight
@@ -181,8 +190,15 @@ public:
     return posts_;
   }
 
+  // How much this client has still to receive. Reported in a status reply so a
+  // client can tell "nothing new" from "the room never heard me".
+  size_t unreadFor(const Client& client) const;
+
 private:
   bool handleText(const identity::Contact& from, ByteView plain);
+  bool handleRequest(Client& client, ByteView plain);
+  void sendStatusResponse(const Client& client, RequestType type);
+
   const Post* nextPostFor(const Client& client) const;
 
   // A client bookmarks by time — it has never heard of our sequence numbers —
