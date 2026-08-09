@@ -1,3 +1,7 @@
+// Copyright (c) 2026 Vladimir Egorov
+// This project is licensed under the MIT License.
+// See the LICENSE file in the root of the repository for the full license text.
+
 // Composition root. The only file where the modules learn about each other:
 // every one of them is written so that it can be built and tested without
 // knowing who sits on the other side, and the wiring is paid for here, once.

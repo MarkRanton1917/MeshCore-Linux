@@ -1,3 +1,7 @@
+// Copyright (c) 2026 Vladimir Egorov
+// This project is licensed under the MIT License.
+// See the LICENSE file in the root of the repository for the full license text.
+
 // Tests for src/radio.
 //
 // The hardware driver cannot run here, but everything above the SPI line can:

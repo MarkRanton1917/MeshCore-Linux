@@ -1,3 +1,7 @@
+// Copyright (c) 2026 Vladimir Egorov
+// This project is licensed under the MIT License.
+// See the LICENSE file in the root of the repository for the full license text.
+
 // Tests for src/room.
 //
 // No network here at all: room depends only on abstractions, so a fake sender

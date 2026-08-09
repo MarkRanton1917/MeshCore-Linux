@@ -1,3 +1,7 @@
+// Copyright (c) 2026 Vladimir Egorov
+// This project is licensed under the MIT License.
+// See the LICENSE file in the root of the repository for the full license text.
+
 // AES-128 block cipher core (FIPS-197).
 //
 // libsodium does not expose AES-128 in any form -- only AES-256-GCM, and only
