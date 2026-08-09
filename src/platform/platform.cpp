@@ -1,7 +1,10 @@
 #include "platform.h"
 
+#include <nlohmann/json.hpp>
+
 #include <cerrno>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <ctime>
 
@@ -11,9 +14,17 @@
 
 using namespace platform;
 
+using Json = nlohmann::json;
+
 LogLevel Log::level_ = LogLevel::INFO;
 
-// ------------------------------------------------------------------ clock
+static std::string scalarToText(const Json& node);
+static bool flatten(const Json& node,
+  const std::string& prefix,
+  std::map<std::string, std::string>& values,
+  std::map<std::string, std::vector<std::string>>& lists);
+
+// clock
 
 Millis SystemClock::mono() const
 {
@@ -35,7 +46,7 @@ bool SystemClock::wallLooksSynced(uint32_t seconds)
   return seconds > 1577836800u;
 }
 
-// ------------------------------------------------------------------ store
+// store
 
 FileStore::FileStore(std::string directory)
   : directory_(std::move(directory))
@@ -126,7 +137,7 @@ bool MemoryStore::write(std::string_view key, ByteView data)
   return true;
 }
 
-// ------------------------------------------------------------------ log
+// log
 
 void Log::setLevel(LogLevel level)
 {
@@ -153,59 +164,66 @@ void Log::write(LogLevel level, const char* format, ...)
   std::fputc('\n', stderr);
 }
 
-// ------------------------------------------------------------------ config
 
-static std::string trim(std::string_view text)
+// config
+
+static std::string scalarToText(const Json& node)
 {
-  size_t begin = 0;
-  size_t end = text.size();
-  while (begin < end && (text[begin] == ' ' || text[begin] == '\t'))
-    begin++;
-  while (end > begin && (text[end - 1] == ' ' || text[end - 1] == '\t' || text[end - 1] == '\r')) {
-    end--;
-  }
-  return std::string(text.substr(begin, end - begin));
+  if (node.is_string()) return node.get<std::string>();
+  if (node.is_boolean()) return node.get<bool>() ? "true" : "false";
+  if (node.is_null()) return std::string();
+  return node.dump();
 }
 
-// INI with sections: a key under [radio] becomes "radio.key".
+static bool flatten(const Json& node,
+  const std::string& prefix,
+  std::map<std::string, std::string>& values,
+  std::map<std::string, std::vector<std::string>>& lists)
+{
+  if (node.is_object()) {
+    for (const auto& [key, child] : node.items()) {
+      if (key.empty()) return false;
+      const std::string full = prefix.empty() ? key : prefix + "." + key;
+      if (!flatten(child, full, values, lists)) return false;
+    }
+    return true;
+  }
+
+  if (node.is_array()) {
+    std::vector<std::string> items;
+    std::string joined;
+    for (const auto& element : node) {
+      if (element.is_object() || element.is_array()) return false;
+      if (!items.empty()) joined += ",";
+      items.push_back(scalarToText(element));
+      joined += items.back();
+    }
+    values[prefix] = joined;
+    lists[prefix] = std::move(items);
+    return true;
+  }
+
+  values[prefix] = scalarToText(node);
+  return true;
+}
+
 bool Config::loadFromString(std::string_view text)
 {
-  std::string section;
-  size_t position = 0;
+  const Json document = Json::parse(text, nullptr, false, false);
+  if (document.is_discarded()) return false;
+  if (!document.is_object()) return false;
 
-  while (position <= text.size()) {
-    const size_t lineEnd = text.find('\n', position);
-    const std::string line =
-      trim(text.substr(position, lineEnd == std::string_view::npos ? text.size() - position : lineEnd - position));
-    if (lineEnd == std::string_view::npos) {
-      position = text.size() + 1;
-    }
-    else {
-      position = lineEnd + 1;
-    }
+  std::map<std::string, std::string> values;
+  std::map<std::string, std::vector<std::string>> lists;
+  if (!flatten(document, std::string(), values, lists)) return false;
 
-    if (line.empty() || line[0] == '#' || line[0] == ';') continue;
-
-    if (line.front() == '[' && line.back() == ']') {
-      section = trim(std::string_view(line).substr(1, line.size() - 2));
-      continue;
-    }
-
-    const size_t equals = line.find('=');
-    if (equals == std::string::npos) return false;
-
-    const std::string key = trim(std::string_view(line).substr(0, equals));
-    const std::string value = trim(std::string_view(line).substr(equals + 1));
-    if (key.empty()) return false;
-
-    values_[section.empty() ? key : section + "." + key] = value;
-  }
+  values_ = std::move(values);
+  lists_ = std::move(lists);
   return true;
 }
 
 bool Config::loadFile(const std::string& path)
 {
-  FileStore store(".");
   int fd = ::open(path.c_str(), O_RDONLY);
   if (fd < 0) return false;
 
@@ -228,6 +246,12 @@ std::string Config::get(std::string_view key, std::string_view fallback) const
 {
   auto found = values_.find(std::string(key));
   return found == values_.end() ? std::string(fallback) : found->second;
+}
+
+std::vector<std::string> Config::getList(std::string_view key) const
+{
+  auto found = lists_.find(std::string(key));
+  return found == lists_.end() ? std::vector<std::string> {} : found->second;
 }
 
 long Config::getInt(std::string_view key, long fallback) const

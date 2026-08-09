@@ -1,0 +1,40 @@
+{
+  "node": {
+    "dir": "./data",
+    "name": "room",
+    "flush_ms": 60000,
+    "advert_ms": 300000
+  },
+
+  "log": {
+    "level": "info"
+  },
+
+  "radio": {
+    "driver": "udp",
+
+    "udp_bind": "127.0.0.1",
+    "udp_port": 0,
+    "udp_peers": [],
+    "udp_group": "",
+    "udp_group_port": 4242,
+
+    "frequency": 869525000,
+    "spreading_factor": 11,
+    "bandwidth": 62500,
+    "coding_rate": 5,
+    "duty_cycle": 10
+  },
+
+  "room": {
+    "admin_password": "",
+    "guest_password": "",
+    "anonymous_read": false
+  },
+
+  "telemetry": {
+    "enabled": true,
+    "queue": 256,
+    "report_ms": 60000
+  }
+}

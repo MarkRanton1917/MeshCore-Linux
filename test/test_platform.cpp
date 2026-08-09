@@ -123,22 +123,29 @@ static void testConfig()
   section("platform: config");
 
   platform::Config config;
-  const char* text = "# a comment\n"
-                     "name = node-one\n"
-                     "\n"
-                     "[radio]\n"
-                     "frequency = 869525000\n"
-                     "spreading = 11\n"
-                     "\n"
-                     "[room]\n"
-                     "anonymous = true\n"
-                     "quiet = no\n";
+  const char* text = "{\n"
+                     "  \"name\": \"node-one\",\n"
+                     "  \"radio\": {\n"
+                     "    \"frequency\": 869525000,\n"
+                     "    \"spreading\": 11,\n"
+                     "    \"peers\": [\"127.0.0.1:1\", \"127.0.0.1:2\"],\n"
+                     "    \"group\": null\n"
+                     "  },\n"
+                     "  \"room\": { \"anonymous\": true, \"quiet\": false }\n"
+                     "}\n";
   that("parses", config.loadFromString(text));
 
   that("top-level key", config.get("name") == "node-one");
-  that("section prefixes the key", config.getInt("radio.frequency") == 869525000);
-  that("second key in a section", config.getInt("radio.spreading") == 11);
+  that("nesting prefixes the key", config.getInt("radio.frequency") == 869525000);
+  that("second key in an object", config.getInt("radio.spreading") == 11);
   that("booleans", config.getBool("room.anonymous") && !config.getBool("room.quiet"));
+
+  const std::vector<std::string> peers = config.getList("radio.peers");
+  that("arrays become lists", peers.size() == 2 && peers[1] == "127.0.0.1:2");
+  that("an array also reads as text", config.get("radio.peers") == "127.0.0.1:1,127.0.0.1:2");
+  that("a scalar has no list", config.getList("name").empty());
+
+  that("null is empty", config.has("radio.group") && config.get("radio.group", "x").empty());
 
   that("missing key falls back", config.get("nothing", "default") == "default");
   that("missing int falls back", config.getInt("radio.nothing", 42) == 42);
@@ -146,7 +153,13 @@ static void testConfig()
   that("has() reports presence", config.has("name") && !config.has("absent"));
 
   platform::Config broken;
-  that("a line without = is an error", !broken.loadFromString("just-a-word\n"));
+  that("malformed json is an error", !broken.loadFromString("{ \"a\": }"));
+  that("a bare value is not a config", !broken.loadFromString("42"));
+  that("an array of objects is refused", !broken.loadFromString("{ \"a\": [ {} ] }"));
+  that("a comment is not json", !broken.loadFromString("// hello\n{}"));
+
+  that("a rejected file changes nothing",
+    !config.loadFromString("{ \"name\": \"other\", ") && config.get("name") == "node-one");
 }
 
 static void testLogLevels()

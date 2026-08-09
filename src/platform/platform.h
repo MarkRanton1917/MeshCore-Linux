@@ -126,10 +126,12 @@ public:
   std::string get(std::string_view key, std::string_view fallback = "") const;
   long getInt(std::string_view key, long fallback = 0) const;
   bool getBool(std::string_view key, bool fallback = false) const;
+  std::vector<std::string> getList(std::string_view key) const;
   bool has(std::string_view key) const;
 
 private:
   std::map<std::string, std::string> values_;
+  std::map<std::string, std::vector<std::string>> lists_;
 };
 
 } // namespace platform

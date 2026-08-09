@@ -160,29 +160,6 @@ std::vector<uint8_t> buildAdvertPayload(const identity::Store& store, uint32_t t
   return payload;
 }
 
-// "a, b, c" -> {"a", "b", "c"}
-std::vector<std::string> splitList(const std::string& text)
-{
-  std::vector<std::string> parts;
-  size_t start = 0;
-  while (start <= text.size()) {
-    const size_t comma = text.find(',', start);
-    const size_t end = comma == std::string::npos ? text.size() : comma;
-
-    size_t from = start;
-    size_t to = end;
-    while (from < to && (text[from] == ' ' || text[from] == '\t'))
-      from++;
-    while (to > from && (text[to - 1] == ' ' || text[to - 1] == '\t'))
-      to--;
-    if (to > from) parts.push_back(text.substr(from, to - from));
-
-    if (comma == std::string::npos) break;
-    start = comma + 1;
-  }
-  return parts;
-}
-
 // Neither gauge belongs on IRadio: they are diagnostics, not something the
 // stack above may steer by.
 uint32_t queueDepthOf(const radio::IRadio& device)
@@ -213,7 +190,7 @@ platform::LogLevel levelFromName(const std::string& name)
 
 int main(int argc, char** argv)
 {
-  const std::string configPath = argc > 1 ? argv[1] : "meshcore.ini";
+  const std::string configPath = argc > 1 ? argv[1] : "meshcore.json";
 
   platform::Config config;
   if (!config.loadFile(configPath)) {
@@ -271,7 +248,7 @@ int main(int argc, char** argv)
     radio::UdpOptions udp;
     udp.bindAddress = config.get("radio.udp_bind", "127.0.0.1");
     udp.listenPort = (uint16_t)config.getInt("radio.udp_port", 0);
-    udp.peers = splitList(config.get("radio.udp_peers"));
+    udp.peers = config.getList("radio.udp_peers");
     udp.multicastGroup = config.get("radio.udp_group");
     udp.multicastPort = (uint16_t)config.getInt("radio.udp_group_port", 4242);
 

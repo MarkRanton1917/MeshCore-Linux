@@ -16,6 +16,10 @@ option(SANITIZE "Build with AddressSanitizer and UndefinedBehaviorSanitizer" OFF
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(SODIUM REQUIRED IMPORTED_TARGET libsodium)
 
+set(JSON_BuildTests OFF CACHE INTERNAL "")
+set(JSON_Install OFF CACHE INTERNAL "")
+add_subdirectory(lib/json EXCLUDE_FROM_ALL)
+
 add_library(meshcore
   src/packet/packet.cpp
   src/crypto/core.cpp
@@ -31,7 +35,7 @@ add_library(meshcore
 )
 
 target_include_directories(meshcore PUBLIC src src/packet src/crypto src/identity src/routing src/room src/platform src/radio src/telemetry)
-target_link_libraries(meshcore PUBLIC PkgConfig::SODIUM)
+target_link_libraries(meshcore PUBLIC PkgConfig::SODIUM PRIVATE nlohmann_json::nlohmann_json)
 target_compile_options(meshcore PRIVATE -Wall -Wextra)
 
 if(SANITIZE)
