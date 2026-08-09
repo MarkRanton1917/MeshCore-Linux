@@ -70,6 +70,12 @@ struct Received {
   core::PublicKey from;
 };
 
+struct Traced {
+  uint32_t tag = 0;
+  std::vector<uint8_t> snr;
+  std::vector<uint8_t> path;
+};
+
 class TestDelegate : public routing::Delegate {
 public:
   void onPayload(const identity::Contact& from, packet::PayloadType type, ByteView plain) override
@@ -93,6 +99,14 @@ public:
     item.plain.assign(payload.begin(), payload.end());
     groups.push_back(std::move(item));
   }
+  void onTrace(const packet::Trace& trace, ByteView path) override
+  {
+    Traced item;
+    item.tag = trace.tag;
+    item.snr.assign(trace.snr.begin(), trace.snr.end());
+    item.path.assign(path.begin(), path.end());
+    traces.push_back(std::move(item));
+  }
   void onAck(routing::SendId id) override
   {
     acked.push_back(id);
@@ -109,6 +123,7 @@ public:
 
   std::vector<Received> payloads;
   std::vector<Received> groups;
+  std::vector<Traced> traces;
   std::vector<routing::SendId> acked;
   std::vector<routing::SendId> failed;
   core::PublicKey anonFrom;
@@ -208,6 +223,7 @@ public:
         if (target == source || !visible_[source][target] || !nodes_[target]->alive) continue;
         routing::RxMeta meta;
         meta.airtime = 50;
+        meta.snr = 6; // decibels; a trace records it in quarters of one
         nodes_[target]->router->onFrame(ByteView { sent.frame.data(), sent.frame.size() }, meta);
       }
     }
@@ -453,6 +469,98 @@ static void testEndpointStillForwards()
   that("and forwarded it anyway", forwarded);
 }
 
+// A flood frame as it would arrive off the air, from nobody in particular.
+static std::vector<uint8_t> floodFrame(const char* body)
+{
+  packet::Packet p;
+  p.header = (uint8_t)(((uint8_t)packet::PayloadType::TXT_MSG << 2) | (uint8_t)packet::RouteType::FLOOD);
+  p.hashSize = NODE_HASH_SIZE;
+  p.hopCount = 0;
+  p.payloadSize = (uint8_t)std::strlen(body);
+  std::memcpy(p.payload.data(), body, p.payloadSize);
+
+  std::vector<uint8_t> frame(MAX_PACKET_FRAME);
+  auto written = packet::serialize(p, ByteSpan { frame.data(), frame.size() });
+  frame.resize(written ? *written : 0);
+  return frame;
+}
+
+static void testTraceCollectsTheRoute()
+{
+  section("routing: a trace records every hop that carried it");
+
+  Network net;
+  const size_t a = net.add(), r1 = net.add(), r2 = net.add(), c = net.add();
+  net.link(a, r1);
+  net.link(r1, r2);
+  net.link(r2, c);
+  net.introduceAll();
+
+  std::vector<uint8_t> payload(MAX_PACKET_PAYLOAD);
+  packet::Trace trace;
+  trace.tag = 0x1234;
+  auto size = packet::encodeTrace(trace, ByteSpan { payload.data(), payload.size() });
+  net.node(a).router->sendFlood(packet::PayloadType::TRACE, ByteView { payload.data(), *size });
+  net.run(3000);
+
+  that("it crossed the network", net.node(c).delegate.traces.size() == 1);
+  if (net.node(c).delegate.traces.empty()) return;
+
+  const Traced& seen = net.node(c).delegate.traces[0];
+  that("the tag came through untouched", seen.tag == 0x1234);
+  that("both repeaters are in the path", seen.path.size() == 2);
+  that("in the order they carried it",
+    seen.path.size() == 2 && seen.path[0] == net.node(r1).store.selfHash()
+      && seen.path[1] == net.node(r2).store.selfHash());
+
+  // One reading per hop, or the two lists no longer line up and the trace says
+  // nothing about which link is the weak one.
+  that("each of them left a reading", seen.snr.size() == seen.path.size());
+  that("in quarter-decibels", !seen.snr.empty() && (int8_t)seen.snr[0] == 24);
+
+  // The first repeater saw it before anybody had touched it.
+  that("a trace with no hops yet is still handed up",
+    net.node(r1).delegate.traces.size() == 1 && net.node(r1).delegate.traces[0].path.empty()
+      && net.node(r1).delegate.traces[0].snr.empty());
+}
+
+static void testDuplicateAgesOut()
+{
+  section("routing: a remembered packet is forgotten again");
+
+  // Slots alone cannot say how long a packet is suppressed: on a busy repeater
+  // the ring wraps in seconds and an echo arrives to a clean cache. The age is
+  // what makes the window a window, and it has to expire — a node that never
+  // forgets stops carrying a genuine resend minutes later.
+  routing::Config config;
+  config.seenSlots = 8;
+  config.seenTtl = 10000;
+  config.forwardJitter = 0;
+
+  Network net;
+  const size_t r = net.add(config);
+  Node& node = net.node(r);
+
+  const std::vector<uint8_t> frame = floodFrame("carry me");
+  routing::RxMeta meta;
+  meta.airtime = 50; // the forwarding delay is twice this, so 100ms
+
+  node.router->tick(1000);
+  node.router->onFrame(ByteView { frame.data(), frame.size() }, meta);
+  node.router->tick(1100);
+  that("carried the first time", node.radio->outbox.size() == 1);
+  node.radio->outbox.clear();
+
+  node.router->onFrame(ByteView { frame.data(), frame.size() }, meta);
+  node.router->tick(1200);
+  that("the echo right behind it is dropped", node.radio->outbox.empty());
+
+  node.router->tick(20000);
+  node.router->onFrame(ByteView { frame.data(), frame.size() }, meta);
+  node.router->tick(20100);
+  that("the same packet long after is carried again", node.radio->outbox.size() == 1);
+}
+
 // Builds an ANON_REQ payload: the sender is not a contact, so its key rides
 // inside the packet.
 static std::vector<uint8_t> anonPayload(const core::PublicKey& from,
@@ -584,6 +692,8 @@ int main()
   testRepeaterLossResetsRoute();
   testRepeatersDoNotCollide();
   testEndpointStillForwards();
+  testTraceCollectsTheRoute();
+  testDuplicateAgesOut();
   testAnonRequest();
   testGroupDelivery();
   testForwardingPolicy();

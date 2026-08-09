@@ -12,11 +12,6 @@ using namespace routing;
 namespace core = crypto::core;
 namespace protocol = crypto::protocol;
 
-// Sized from how long a flood takes to cross the network, not picked at random:
-// if an echo comes back after its entry was evicted we retransmit our own
-// packet again, and that resonance looks like "the network is slow sometimes".
-static constexpr size_t kSeenSlots = 128;
-
 // Publishing is a no-op when no bus is attached.
 static void publish(telemetry::Bus* bus, telemetry::EventType type, Millis at, uint32_t detail = 0)
 {
@@ -34,7 +29,8 @@ Router::Router(identity::Store& store, Radio& radio, Delegate& delegate, Config 
     delegate_(delegate),
     config_(config)
 {
-  seen_.resize(kSeenSlots);
+  // One slot minimum: a cache of nothing would forward every echo forever.
+  seen_.resize(config_.seenSlots == 0 ? 1 : config_.seenSlots);
 }
 
 // ------------------------------------------------------------------ dedup
@@ -48,11 +44,21 @@ static uint32_t shortHashOf(ByteView frame)
     | (uint32_t)hash.data[3] << 24;
 }
 
+// Stamps are stored one past the clock so that an entry written at time zero is
+// still distinguishable from a slot that was never used. The offset cancels out
+// wherever an age is computed, and both places are here.
 bool Router::alreadySeen(ByteView frame)
 {
   const uint32_t key = shortHashOf(frame);
   for (const Seen& entry : seen_) {
-    if (entry.at != 0 && entry.shortHash == key) return true;
+    if (entry.at == 0 || entry.shortHash != key) continue;
+
+    // An entry older than the flood it was meant to suppress is no longer
+    // evidence of anything: the packet in hand is a new one that happens to
+    // hash the same, or the same packet sent again minutes later, and both
+    // deserve to travel.
+    if (config_.seenTtl != 0 && (now_ + 1) - entry.at >= config_.seenTtl) return false;
+    return true;
   }
   return false;
 }
@@ -188,6 +194,13 @@ void Router::onFrame(ByteView frame, RxMeta meta)
   case packet::PayloadType::ADVERT:
     // Unaddressed and unencrypted. Verifying and remembering it belongs to the
     // layer above; here it only gets forwarded.
+    break;
+  case packet::PayloadType::TRACE:
+    // Unencrypted and addressed to nobody. Handed up as it stands; our own
+    // reading is written in on the way out, where the packet is copied.
+    if (auto trace = packet::decodeTrace(payload)) {
+      delegate_.onTrace(*trace, ByteView { parsed->path.data(), parsed->pathSize() });
+    }
     break;
   case packet::PayloadType::GRP_TXT:
   case packet::PayloadType::GRP_DATA:
@@ -399,6 +412,16 @@ void Router::considerForwarding(const packet::Packet& p, RxMeta meta)
     if (!packet::stripSelf(copy, store_.selfHash())) return;
   }
 
+  // A trace collects one reading per node that carried it, in the order they
+  // did. Flood has just written our hash into the path and the reading lines up
+  // with it; a direct trace travels a route its sender wrote out beforehand,
+  // and the readings line up with that instead. Either way the count only stays
+  // right if every hop appends exactly one, which is why failing to append
+  // stops the packet.
+  if (copy.payloadType() == packet::PayloadType::TRACE) {
+    if (!packet::appendTraceHop(copy, (int16_t)(meta.snr * 4))) return;
+  }
+
   std::vector<uint8_t> frame(MAX_PACKET_FRAME);
   auto written = packet::serialize(copy, ByteSpan { frame.data(), frame.size() });
   if (!written.has_value()) return;
@@ -406,7 +429,9 @@ void Router::considerForwarding(const packet::Packet& p, RxMeta meta)
 
   publish(config_.bus, telemetry::EventType::Forwarded, now_);
   const Millis delay = meta.airtime * config_.forwardAirtimeFactor + jitter();
-  queueFrame(std::move(frame), now_ + delay, Priority::NORMAL);
+
+  // Somebody else's packet, so it waits behind everything of ours.
+  queueFrame(std::move(frame), now_ + delay, Priority::LOW);
 }
 
 // ------------------------------------------------------------------ send

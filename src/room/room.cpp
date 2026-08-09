@@ -68,6 +68,11 @@ void Room::setServerTime(uint32_t unixSeconds)
   serverTime_ = unixSeconds;
 }
 
+void Room::setRadioLoad(uint32_t permille)
+{
+  radioLoad_ = permille;
+}
+
 void Room::tick(Millis now)
 {
   now_ = now;
@@ -437,10 +442,18 @@ bool Room::shouldAck(packet::PayloadType type, ByteView plain)
   return (TextType)message->txtType != TextType::CLI;
 }
 
+// The room stays a repeater, and the policy is the only thing that can talk it
+// out of carrying a particular packet. Without one attached everything travels
+// on, which is what a room server did before the policy existed.
 bool Room::shouldForward(const packet::Packet& p)
 {
-  (void)p;
-  return true;
+  if (config_.forwarder == nullptr) return true;
+
+  const bool carry = config_.forwarder->shouldForward(p, now_, radioLoad_);
+  if (!carry && config_.bus != nullptr) {
+    config_.bus->publish(telemetry::EventType::ForwardRefused, serverTime_);
+  }
+  return carry;
 }
 
 // ------------------------------------------------------------------ channels
@@ -578,6 +591,21 @@ static bool parseUint32(std::string_view text, uint32_t& out)
   return true;
 }
 
+// Every switch an admin can flip spells it the same way, and every one of them
+// refuses anything else rather than reading it as "off".
+static bool parseOnOff(std::string_view text, bool& out)
+{
+  if (text == "on" || text == "1" || text == "true") {
+    out = true;
+    return true;
+  }
+  if (text == "off" || text == "0" || text == "false") {
+    out = false;
+    return true;
+  }
+  return false;
+}
+
 // Days to a civil date, Howard Hinnant's algorithm. Here rather than in gmtime
 // because that would be a call into the C library's own notion of the timezone,
 // and this has to be UTC on every host.
@@ -663,7 +691,7 @@ bool Room::handleCommand(Client& client, uint32_t timestamp, std::string_view li
   const std::string_view verb = takeWord(rest);
 
   if (verb == "help") {
-    sendCliReply(client.pk, "clock, time <epoch>, ver, advert, set, get, clear posts, reboot");
+    sendCliReply(client.pk, "clock, time <epoch>, ver, advert, set, get, clear posts|stats, reboot");
     return true;
   }
   if (verb == "ver") {
@@ -801,13 +829,7 @@ void Room::commandSet(const PublicKey& to, std::string_view rest)
 
   if (key == "anonymous.read") {
     bool allow = false;
-    if (value == "on" || value == "1" || value == "true") {
-      allow = true;
-    }
-    else if (value == "off" || value == "0" || value == "false") {
-      allow = false;
-    }
-    else {
+    if (!parseOnOff(value, allow)) {
       sendCliReply(to, "ERR - expected on or off");
       return;
     }
@@ -824,7 +846,51 @@ void Room::commandSet(const PublicKey& to, std::string_view rest)
     return;
   }
 
-  sendCliReply(to, "ERR - known keys: name, password, guest.password, anonymous.read");
+  if (key == "repeat") {
+    bool on = false;
+    if (!parseOnOff(value, on)) {
+      sendCliReply(to, "ERR - expected on or off");
+      return;
+    }
+    if (config_.forwarder == nullptr) {
+      sendCliReply(to, "ERR - no transit policy here");
+      return;
+    }
+    // Stored before it is applied, like every other setting an admin changes:
+    // a repeater that starts carrying again at the next reboot, having been
+    // switched off over the air, is the failure worth avoiding.
+    if (config_.admin == nullptr || !config_.admin->saveSetting("repeater.enabled", on ? "true" : "false")) {
+      sendCliReply(to, "ERR - could not store the setting");
+      return;
+    }
+    config_.forwarder->setEnabled(on);
+    replyf(to, "OK - repeating %s", on ? "on" : "off");
+    return;
+  }
+
+  if (key == "hops.max") {
+    uint32_t hops = 0;
+    if (!parseUint32(value, hops) || hops == 0 || hops > MAX_HOP_COUNT) {
+      replyf(to, "ERR - hops must be 1..%u", (unsigned)MAX_HOP_COUNT);
+      return;
+    }
+    if (config_.forwarder == nullptr) {
+      sendCliReply(to, "ERR - no transit policy here");
+      return;
+    }
+
+    char digits[12];
+    std::snprintf(digits, sizeof digits, "%u", (unsigned)hops);
+    if (config_.admin == nullptr || !config_.admin->saveSetting("repeater.max_hops", digits)) {
+      sendCliReply(to, "ERR - could not store the setting");
+      return;
+    }
+    config_.forwarder->setMaxHops((uint8_t)hops);
+    replyf(to, "OK - carrying up to %u hops", (unsigned)config_.forwarder->maxHops());
+    return;
+  }
+
+  sendCliReply(to, "ERR - known keys: name, password, guest.password, anonymous.read, repeat, hops.max");
 }
 
 void Room::commandGet(const PublicKey& to, std::string_view rest)
@@ -833,8 +899,36 @@ void Room::commandGet(const PublicKey& to, std::string_view rest)
 
   if (key == "stats") {
     const uint32_t uptime = config_.admin != nullptr ? config_.admin->uptime() : 0;
+
+    // The board and the transit in one line, because they are one node and the
+    // question behind the command is always "is it well".
+    if (config_.forwarder != nullptr) {
+      const repeater::Stats& transit = config_.forwarder->stats();
+      const uint32_t refused = transit.hopLimit + transit.blocked + transit.rateLimited + transit.budget;
+      replyf(to, "posts %zu/%u, clients %zu/%u, up %uh%02um, fwd %u, refused %u, duty %u.%u%%", posts_.size(),
+        (unsigned)MAX_POSTS, clients_.size(), (unsigned)MAX_ROOM_CLIENTS, uptime / 3600, (uptime / 60) % 60,
+        (unsigned)transit.forwarded, (unsigned)refused, radioLoad_ / 10, radioLoad_ % 10);
+      return;
+    }
+
     replyf(to, "posts %zu/%u, clients %zu/%u, up %uh%02um", posts_.size(), (unsigned)MAX_POSTS, clients_.size(),
       (unsigned)MAX_ROOM_CLIENTS, uptime / 3600, (uptime / 60) % 60);
+    return;
+  }
+  if (key == "transit") {
+    if (config_.forwarder == nullptr) {
+      sendCliReply(to, "ERR - no transit policy here");
+      return;
+    }
+    // Which counter moved is the diagnosis, so this one breaks them out.
+    const repeater::Stats& transit = config_.forwarder->stats();
+    replyf(to, "repeat %s, max %u hops, fwd %u, hops %u, blocked %u, rate %u, budget %u",
+      config_.forwarder->enabled() ? "on" : "off", (unsigned)config_.forwarder->maxHops(), (unsigned)transit.forwarded,
+      (unsigned)transit.hopLimit, (unsigned)transit.blocked, (unsigned)transit.rateLimited, (unsigned)transit.budget);
+    return;
+  }
+  if (key == "neighbors" || key == "neighbours") {
+    sendCliReply(to, neighbourList());
     return;
   }
   if (key == "name") {
@@ -847,7 +941,7 @@ void Room::commandGet(const PublicKey& to, std::string_view rest)
     return;
   }
 
-  sendCliReply(to, "ERR - known keys: stats, name, time");
+  sendCliReply(to, "ERR - known keys: stats, transit, neighbors, name, time");
 }
 
 void Room::commandClear(const PublicKey& to, std::string_view rest)
@@ -863,7 +957,20 @@ void Room::commandClear(const PublicKey& to, std::string_view rest)
     return;
   }
 
-  sendCliReply(to, "ERR - known keys: posts");
+  if (key == "stats") {
+    if (config_.forwarder == nullptr) {
+      sendCliReply(to, "ERR - no transit policy here");
+      return;
+    }
+    // Counters only. Nothing a packet decision depends on is reset here, so an
+    // admin watching a problem can start the count again without changing how
+    // the node behaves while they watch.
+    config_.forwarder->clearStats();
+    sendCliReply(to, "OK - transit counters cleared");
+    return;
+  }
+
+  sendCliReply(to, "ERR - known keys: posts, stats");
 }
 
 // ------------------------------------------------------------------ push
@@ -895,6 +1002,35 @@ uint32_t Room::seqFromTimestamp(uint32_t bookmark) const
     seq = post.seq;
   }
   return seq;
+}
+
+std::string Room::neighbourList() const
+{
+  // One reply, so the list is cut to what fits rather than split over several
+  // frames: a second frame costs a quarter of a second of air, and the four
+  // loudest neighbours answer the question the command was asking.
+  std::vector<const identity::Contact*> heard = store_.neighbours(MAX_CLI_REPLY / 24);
+  if (heard.empty()) return "no neighbours heard yet";
+
+  std::string out;
+  for (const identity::Contact* contact : heard) {
+    char entry[48];
+
+    // Minutes since we last heard it, and a dash when there is no clock to
+    // measure against — better than an age counted from 1970.
+    char age[12] = "-";
+    if (serverTime_ != 0 && contact->lastHeard != 0 && serverTime_ >= contact->lastHeard) {
+      std::snprintf(age, sizeof age, "%um", (unsigned)((serverTime_ - contact->lastHeard) / 60));
+    }
+
+    const std::string name = contact->name.empty() ? std::string("?") : contact->name.substr(0, 12);
+    std::snprintf(entry, sizeof entry, "%s%02x %s %ddB %s", out.empty() ? "" : "; ", contact->hash(), name.c_str(),
+      (int)contact->snr, age);
+
+    if (out.size() + std::strlen(entry) > MAX_CLI_REPLY) break;
+    out += entry;
+  }
+  return out;
 }
 
 // Only four bytes of the author's key are kept with a post, so the name is

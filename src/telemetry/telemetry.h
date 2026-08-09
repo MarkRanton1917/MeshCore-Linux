@@ -26,6 +26,11 @@ enum class EventType : uint8_t {
   FrameDuplicate,
   DecryptFailed,
   Forwarded,
+
+  // A packet the transit policy would not carry. Why it refused is the
+  // repeater's own business and is counted there; here it is one number,
+  // because what a graph needs to show is transit falling off.
+  ForwardRefused,
   AckTimeout,
   ContactAdded,
   ClientLogin,

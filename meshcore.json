@@ -2,6 +2,7 @@
   "node": {
     "dir": "./data",
     "name": "room",
+    "type": "room",
     "flush_ms": 60000,
     "advert_ms": 300000
   },
@@ -24,6 +25,22 @@
     "bandwidth": 62500,
     "coding_rate": 5,
     "duty_cycle": 10
+  },
+
+  "routing": {
+    "forward_airtime_factor": 2,
+    "forward_jitter": 400,
+    "max_routes": 128,
+    "seen_slots": 128,
+    "seen_ttl_ms": 300000
+  },
+
+  "repeater": {
+    "enabled": true,
+    "max_hops": 12,
+    "per_source_per_minute": 30,
+    "duty_ceiling": 80,
+    "blocked": []
   },
 
   "room": {

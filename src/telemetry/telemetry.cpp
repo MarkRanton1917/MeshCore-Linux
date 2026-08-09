@@ -14,6 +14,7 @@ static const char* kNames[] = {
   "frames_duplicate",
   "decrypt_failed",
   "frames_forwarded",
+  "frames_refused",
   "ack_timeouts",
   "contacts_added",
   "client_logins",
@@ -94,13 +95,14 @@ std::string telemetry::prometheusText(const Counters& counters)
 void telemetry::logCounters(const Counters& counters)
 {
   platform::Log::write(platform::LogLevel::INFO,
-    "rx=%llu tx=%llu dup=%llu undecryptable=%llu forwarded=%llu acktimeout=%llu "
+    "rx=%llu tx=%llu dup=%llu undecryptable=%llu forwarded=%llu refused=%llu acktimeout=%llu "
     "queue=%u duty=%u.%u%% dropped=%llu",
     (unsigned long long)counters.byType[(size_t)EventType::FrameRx],
     (unsigned long long)counters.byType[(size_t)EventType::FrameTx],
     (unsigned long long)counters.byType[(size_t)EventType::FrameDuplicate],
     (unsigned long long)counters.byType[(size_t)EventType::DecryptFailed],
     (unsigned long long)counters.byType[(size_t)EventType::Forwarded],
+    (unsigned long long)counters.byType[(size_t)EventType::ForwardRefused],
     (unsigned long long)counters.byType[(size_t)EventType::AckTimeout], counters.txQueueDepth,
     counters.dutyCyclePermille / 10, counters.dutyCyclePermille % 10, (unsigned long long)counters.dropped);
 }

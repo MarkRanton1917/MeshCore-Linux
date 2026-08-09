@@ -10,6 +10,7 @@
 #   ./network.sh                     three nodes, full mesh
 #   ./network.sh -n 5 -t chain       five nodes in a line, 1-2-3-4-5
 #   ./network.sh -n 4 -t star -v     hub plus three leaves, debug logging
+#   ./network.sh -n 5 -t chain -r 2,3,4   the middle of the chain as repeaters
 
 set -euo pipefail
 
@@ -20,12 +21,13 @@ workdir=./run
 advert_ms=10000
 level=info
 clean=0
+repeaters=
 
 usage()
 {
   cat <<'TEXT'
 usage: network.sh [-n count] [-t mesh|chain|star] [-p base-port] [-d dir]
-                  [-a advert-ms] [-v] [-c]
+                  [-a advert-ms] [-r list] [-v] [-c]
 
   -n  number of nodes (default 3)
   -t  topology (default mesh)
@@ -36,18 +38,22 @@ usage: network.sh [-n count] [-t mesh|chain|star] [-p base-port] [-d dir]
   -d  working directory for configs, data and logs (default ./run)
   -a  advert interval in milliseconds (default 10000, the node default is
       300000 which is too slow to watch)
+  -r  comma-separated nodes that advertise themselves as repeaters, e.g. 2,3.
+      Every node carries other people's packets whatever this says; what it
+      changes is what the network is told the node is for
   -v  log at debug instead of info
   -c  wipe the working directory first, so every node starts as a stranger
 TEXT
 }
 
-while getopts "n:t:p:d:a:vch" option; do
+while getopts "n:t:p:d:a:r:vch" option; do
   case "$option" in
   n) count=$OPTARG ;;
   t) topology=$OPTARG ;;
   p) base_port=$OPTARG ;;
   d) workdir=$OPTARG ;;
   a) advert_ms=$OPTARG ;;
+  r) repeaters=$OPTARG ;;
   v) level=debug ;;
   c) clean=1 ;;
   h)
@@ -129,6 +135,23 @@ peers_of()
   echo "$list"
 }
 
+# What node $1 tells the network it is. Only the advert changes: this binary is
+# a room server that also repeats, whichever answer comes back here.
+type_of()
+{
+  local self=$1
+  local entry
+  local IFS=,
+
+  for entry in $repeaters; do
+    if [ "$entry" = "$self" ]; then
+      echo repeater
+      return
+    fi
+  done
+  echo room
+}
+
 pids=()
 
 stop()
@@ -161,6 +184,7 @@ for ((node = 1; node <= count; node++)); do
   "node": {
     "dir": "$home/data",
     "name": "$name",
+    "type": "$(type_of "$node")",
     "flush_ms": 30000,
     "advert_ms": $advert_ms
   },
@@ -186,7 +210,7 @@ JSON
   "$binary" "$config" > >(tee "$home/node.log" | sed -u "s/^/[$name] /") 2>&1 &
   pids+=($!)
 
-  echo "$name  port $(port_of "$node")  peers [$(peers_of "$node")]"
+  echo "$name  $(type_of "$node")  port $(port_of "$node")  peers [$(peers_of "$node")]"
 done
 
 echo "running, Ctrl-C to stop"

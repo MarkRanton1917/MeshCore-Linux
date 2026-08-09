@@ -100,6 +100,19 @@ static void testTxQueue()
   that("then oldest first", queue.pop(out) && out[0] == 1);
   that("then the next", queue.pop(out) && out[0] == 2);
   that("empty queue reports empty", !queue.pop(out));
+
+  // Transit sits below our own traffic, and the priority has to survive the
+  // trip out of the queue: the duty cycle puts frames back, and one that came
+  // back promoted would overtake the answers it is supposed to yield to.
+  radio::TxQueue levels(3);
+  levels.push(view(a), radio::Priority::LOW);
+  levels.push(view(b), radio::Priority::NORMAL);
+  levels.push(view(c), radio::Priority::HIGH);
+
+  radio::Priority priority = radio::Priority::NORMAL;
+  that("high first", levels.pop(out, &priority) && out[0] == 3 && priority == radio::Priority::HIGH);
+  that("then ours", levels.pop(out, &priority) && out[0] == 2 && priority == radio::Priority::NORMAL);
+  that("transit last", levels.pop(out, &priority) && out[0] == 1 && priority == radio::Priority::LOW);
 }
 
 static void testVirtualRadio()

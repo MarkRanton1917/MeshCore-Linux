@@ -287,6 +287,47 @@ std::optional<size_t> packet::encodeEnvelope(const Envelope& e, ByteSpan out)
   return total;
 }
 
+std::optional<packet::Trace> packet::decodeTrace(ByteView payload)
+{
+  if (payload.size() < TRACE_PREFIX_SIZE) return std::nullopt;
+
+  Trace trace;
+  trace.tag = readUint32(payload, 0);
+  trace.authCode = readUint32(payload, PACKET_TIMESTAMP_SIZE);
+  trace.flags = payload[PACKET_TIMESTAMP_SIZE * 2];
+  trace.snr = payload.subspan(TRACE_PREFIX_SIZE);
+  return trace;
+}
+
+std::optional<size_t> packet::encodeTrace(const Trace& t, ByteSpan out)
+{
+  const size_t total = TRACE_PREFIX_SIZE + t.snr.size();
+  if (total > MAX_PACKET_PAYLOAD || out.size() < total) return std::nullopt;
+
+  writeUint32(out, 0, t.tag);
+  writeUint32(out, PACKET_TIMESTAMP_SIZE, t.authCode);
+  out[PACKET_TIMESTAMP_SIZE * 2] = t.flags;
+
+  if (!t.snr.empty()) {
+    memcpy(out.data() + TRACE_PREFIX_SIZE, t.snr.data(), t.snr.size());
+  }
+  return total;
+}
+
+bool packet::appendTraceHop(Packet& p, int16_t snrQuarterDb)
+{
+  if (p.payloadType() != PayloadType::TRACE) return false;
+  if (p.payloadSize < TRACE_PREFIX_SIZE) return false; // not a trace, whatever the header says
+  if (p.payloadSize >= MAX_PACKET_PAYLOAD) return false;
+
+  // Clamped rather than wrapped: a reading off the end of the scale is still
+  // "as good as it gets" or "barely heard", and wrapping would turn the second
+  // into the first.
+  const int16_t clamped = snrQuarterDb < -128 ? -128 : (snrQuarterDb > 127 ? 127 : snrQuarterDb);
+  p.payload[p.payloadSize++] = (uint8_t)(int8_t)clamped;
+  return true;
+}
+
 std::optional<packet::PathReturn> packet::decodePath(ByteView payload)
 {
   if (payload.empty()) return std::nullopt;

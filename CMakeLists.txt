@@ -59,6 +59,7 @@ add_library(meshcore
   src/crypto/aes128.c
   src/identity/identity.cpp
   src/routing/routing.cpp
+  src/repeater/repeater.cpp
   src/room/room.cpp
   src/platform/platform.cpp
   src/radio/radio.cpp
@@ -66,7 +67,7 @@ add_library(meshcore
   src/telemetry/telemetry.cpp
 )
 
-target_include_directories(meshcore PUBLIC src src/packet src/crypto src/identity src/routing src/room src/platform src/radio src/telemetry)
+target_include_directories(meshcore PUBLIC src src/packet src/crypto src/identity src/routing src/repeater src/room src/platform src/radio src/telemetry)
 target_link_libraries(meshcore PUBLIC PkgConfig::SODIUM PRIVATE nlohmann_json::nlohmann_json)
 target_compile_options(meshcore PRIVATE -Wall -Wextra)
 
@@ -81,7 +82,7 @@ target_compile_options(meshcore-node PRIVATE -Wall -Wextra)
 
 enable_testing()
 
-foreach(suite test_packet test_crypto test_identity test_routing test_room test_platform test_radio test_telemetry)
+foreach(suite test_packet test_crypto test_identity test_routing test_repeater test_room test_platform test_radio test_telemetry)
   add_executable(${suite} test/${suite}.cpp)
   target_include_directories(${suite} PRIVATE test)
   target_link_libraries(${suite} PRIVATE meshcore)

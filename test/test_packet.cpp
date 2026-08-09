@@ -404,6 +404,62 @@ static void testGroupCodec()
   that("over one frame is refused", !packet::encodeGroup(group, sink));
 }
 
+static void testTraceCodec()
+{
+  section("packet: trace");
+
+  std::vector<uint8_t> out(MAX_PACKET_PAYLOAD);
+  ByteSpan sink { out.data(), out.size() };
+
+  std::vector<uint8_t> readings { 0x20, 0xF0, 0x04 };
+  packet::Trace trace;
+  trace.tag = 0xDEADBEEF;
+  trace.authCode = 0x01020304;
+  trace.flags = 0x05;
+  trace.snr = view(readings);
+
+  auto size = packet::encodeTrace(trace, sink);
+  that("encodes", size && *size == TRACE_PREFIX_SIZE + readings.size());
+
+  auto decoded = packet::decodeTrace(ByteView { out.data(), *size });
+  that("round-trip",
+    decoded && decoded->tag == 0xDEADBEEF && decoded->authCode == 0x01020304 && decoded->flags == 0x05
+      && decoded->snr.size() == 3 && decoded->snr[1] == 0xF0);
+
+  std::vector<uint8_t> tooShort(TRACE_PREFIX_SIZE - 1, 0);
+  that("a payload shorter than the prefix is refused", !packet::decodeTrace(view(tooShort)));
+
+  auto empty = packet::decodeTrace(ByteView { out.data(), TRACE_PREFIX_SIZE });
+  that("a trace with no hops yet is fine", empty && empty->snr.empty());
+
+  // What a repeater does to a trace on its way through.
+  packet::Packet p;
+  p.header = (uint8_t)(((uint8_t)packet::PayloadType::TRACE << 2) | (uint8_t)packet::RouteType::FLOOD);
+  p.payloadSize = (uint8_t)TRACE_PREFIX_SIZE;
+  that("a hop is appended", packet::appendTraceHop(p, 32));
+  that("payload grew by one", p.payloadSize == TRACE_PREFIX_SIZE + 1);
+  that("and it is the reading", (int8_t)p.payload[TRACE_PREFIX_SIZE] == 32);
+
+  that("a reading off the scale is clamped, not wrapped", packet::appendTraceHop(p, 400));
+  that("to the top of the range", (int8_t)p.payload[TRACE_PREFIX_SIZE + 1] == 127);
+  that("and at the bottom too", packet::appendTraceHop(p, -400) && (int8_t)p.payload[TRACE_PREFIX_SIZE + 2] == -128);
+
+  // The count of readings has to match the count of hops, so a frame with no
+  // room for another one stops rather than travelling on out of step.
+  p.payloadSize = MAX_PACKET_PAYLOAD;
+  that("a full frame takes no more hops", !packet::appendTraceHop(p, 0));
+
+  packet::Packet other;
+  other.header = (uint8_t)(((uint8_t)packet::PayloadType::TXT_MSG << 2) | (uint8_t)packet::RouteType::FLOOD);
+  other.payloadSize = 20;
+  that("and nothing else is treated as a trace", !packet::appendTraceHop(other, 0));
+
+  packet::Packet stub;
+  stub.header = (uint8_t)(((uint8_t)packet::PayloadType::TRACE << 2) | (uint8_t)packet::RouteType::FLOOD);
+  stub.payloadSize = 2;
+  that("a trace too short to be one is refused", !packet::appendTraceHop(stub, 0));
+}
+
 int main()
 {
   testParseRejects();
@@ -417,5 +473,6 @@ int main()
   testLoginResponseCodec();
   testPathCodec();
   testGroupCodec();
+  testTraceCodec();
   return check::report();
 }

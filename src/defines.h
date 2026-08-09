@@ -44,6 +44,7 @@
 #define ANON_REQ_PREFIX_SIZE (NODE_HASH_SIZE + PACKET_PUBLIC_KEY_SIZE + PACKET_MAC_SIZE)
 #define PATH_EXTRA_TYPE_SIZE 1
 #define ENVELOPE_PREFIX_SIZE (NODE_HASH_SIZE * 2 + PACKET_MAC_SIZE)
+#define TRACE_PREFIX_SIZE (4 + 4 + 1) // tag, auth code, flags
 #define GROUP_PREFIX_SIZE (NODE_HASH_SIZE + PACKET_MAC_SIZE)
 #define LOGIN_RESPONSE_NONCE_SIZE 4
 
@@ -62,7 +63,12 @@
 #define MAX_CONTACTS 512
 #define MAX_CONTACT_NAME 64
 #define MAX_SECRET_CACHE 256
-#define CONTACTS_FORMAT_VERSION 1
+
+// Version 2 keeps what the radio heard — when, how well, how far — beside what
+// the advert claimed. Version 1 files are read and upgraded; the fields they
+// have no room for start empty and fill in with the next packet.
+#define CONTACTS_FORMAT_VERSION 2
+#define CONTACTS_FORMAT_MIN_VERSION 1
 
 // Room. A noticeboard, not an archive: post 33 overwrites post 1.
 #define MAX_POSTS 32
@@ -96,6 +102,13 @@
 // A reply has to fit one frame: 184 payload bytes, less the envelope, less what
 // AES padding rounds up, less the text prefix. 160 leaves room to spare.
 #define MAX_CLI_REPLY 160
+
+// Repeater. Transit is rate limited per previous hop, and there are only so
+// many of those: 256 node hashes, plus one bucket for what we heard straight
+// from its author, whose hash the frame does not carry.
+#define REPEATER_SOURCE_BUCKETS 257
+#define REPEATER_DIRECT_BUCKET 256
+#define REPEATER_RATE_WINDOW_MS 60000
 
 // Login request plaintext: timestamp(4) syncSince(4) password(rest).
 #define LOGIN_REQUEST_PREFIX_SIZE 8

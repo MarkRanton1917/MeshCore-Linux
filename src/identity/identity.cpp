@@ -4,6 +4,7 @@
 
 #include "identity.h"
 
+#include <algorithm>
 #include <cerrno>
 #include <cstdio>
 #include <cstring>
@@ -23,8 +24,13 @@ namespace core = crypto::core;
 //   byte 0            format version
 //   then per contact: pk(32) timestamp(4) type(1) flags(1) lat(4) lon(4)
 //                     nameLength(1) name(nameLength)
+//                     [v2] lastHeard(4) snr(2) hops(1)
+//
+// The v2 tail sits after the name rather than before it, so a v1 record is a v2
+// record that stops early and one reader handles both.
 
 static constexpr size_t kContactFixedSize = PACKET_PUBLIC_KEY_SIZE + 4 + 1 + 1 + 4 + 4 + 1;
+static constexpr size_t kContactHeardSize = 4 + 2 + 1;
 
 static uint32_t readUint32(ByteView view, size_t offset)
 {
@@ -197,6 +203,33 @@ Update Store::remember(const packet::Advert& advert)
   return Update::ADDED;
 }
 
+void Store::noteHeard(const PublicKey& pk, uint32_t at, int16_t snr, uint8_t hops)
+{
+  Contact* contact = findMutable(pk);
+  if (contact == nullptr) return;
+
+  contact->lastHeard = at;
+  contact->snr = snr;
+  contact->hops = hops;
+}
+
+std::vector<const Contact*> Store::neighbours(size_t limit) const
+{
+  std::vector<const Contact*> found;
+  if (limit == 0) return found;
+
+  for (const Contact& contact : contacts_) {
+    if (contact.isNeighbour()) found.push_back(&contact);
+  }
+
+  // Most recently heard first: a list of neighbours is read to find out who is
+  // there now, and the ones that answered a minute ago are the answer.
+  std::sort(found.begin(), found.end(), [](const Contact* a, const Contact* b) { return a->lastHeard > b->lastHeard; });
+
+  if (found.size() > limit) found.resize(limit);
+  return found;
+}
+
 const SharedSecret* Store::secretFor(const PublicKey& pk)
 {
   clock_++;
@@ -253,7 +286,8 @@ bool Store::loadContacts(const std::string& path)
   }
   close(fd);
 
-  if (blob.empty() || blob[0] != CONTACTS_FORMAT_VERSION) return false;
+  if (blob.empty() || blob[0] > CONTACTS_FORMAT_VERSION || blob[0] < CONTACTS_FORMAT_MIN_VERSION) return false;
+  const uint8_t version = blob[0];
 
   std::vector<Contact> parsed;
   parsed.reserve(MAX_CONTACTS);
@@ -282,6 +316,18 @@ bool Store::loadContacts(const std::string& path)
     contact.name.assign((const char*)view.data() + offset, nameLength);
     offset += nameLength;
 
+    // A file written before the node kept link quality has none to give. The
+    // fields stay empty and fill in with the next packet from that contact,
+    // which is the honest answer to "when did we last hear it".
+    if (version >= 2) {
+      if (view.size() - offset < kContactHeardSize) return false;
+      contact.lastHeard = readUint32(view, offset);
+      offset += 4;
+      contact.snr = (int16_t)(uint16_t)((uint16_t)view[offset] | (uint16_t)view[offset + 1] << 8);
+      offset += 2;
+      contact.hops = view[offset++];
+    }
+
     parsed.push_back(std::move(contact));
   }
 
@@ -307,6 +353,11 @@ bool Store::writeContacts(const std::string& path) const
     const uint8_t nameLength = (uint8_t)std::min<size_t>(contact.name.size(), MAX_CONTACT_NAME);
     blob.push_back(nameLength);
     blob.insert(blob.end(), contact.name.begin(), contact.name.begin() + nameLength);
+
+    appendUint32(blob, contact.lastHeard);
+    blob.push_back((uint8_t)((uint16_t)contact.snr));
+    blob.push_back((uint8_t)((uint16_t)contact.snr >> 8));
+    blob.push_back(contact.hops);
   }
 
   int fd = ::open(path.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0600);

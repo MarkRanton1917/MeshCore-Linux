@@ -50,9 +50,24 @@ struct Contact {
   int32_t longitude = 0;
   std::string name;
 
+  // What the radio heard, as opposed to what the advert claimed: the link, not
+  // the peer. Filled in from adverts, because an advert is the one packet that
+  // names its sender before anything is decrypted — everything else arrives
+  // behind a one-byte hash and is only attributed after the MAC checks out.
+  uint32_t lastHeard = 0; // wall clock, seconds
+  int16_t snr = 0; // decibels, of the last frame from this contact
+  uint8_t hops = 0; // how many nodes it came through; 0 is a neighbour
+
   uint8_t hash() const
   {
     return pk.data[0];
+  }
+
+  // A contact we hear directly. What "neighbour" means here and nowhere else,
+  // so a second opinion cannot creep in somewhere later.
+  bool isNeighbour() const
+  {
+    return lastHeard != 0 && hops == 0;
   }
 };
 
@@ -93,6 +108,16 @@ public:
   // one whose timestamp is not newer than the stored one, otherwise anyone
   // could roll our records back by replaying a genuine old advert.
   Update remember(const packet::Advert& advert);
+
+  // What the radio heard, kept apart from what the advert said: remember() has
+  // only the packet's claims, and this has the link. Silently does nothing for
+  // a key we do not know — an unknown contact is not worth a slot until it has
+  // introduced itself.
+  void noteHeard(const PublicKey& pk, uint32_t at, int16_t snr, uint8_t hops);
+
+  // Neighbours first, most recently heard first within that. Returned as
+  // pointers into the store, so they live exactly as long as the store does.
+  std::vector<const Contact*> neighbours(size_t limit) const;
 
   // Cached ECDH. Not const: it fills the cache, and hiding that behind mutable
   // would be worse. The pointer stays valid until a later call evicts the slot.

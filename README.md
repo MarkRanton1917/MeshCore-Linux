@@ -20,14 +20,16 @@ Dependencies point downward only; no module names the one above it.
 | [crypto/protocol](src/crypto/protocol.h) | MeshCore-specific constructions built from those primitives. | core, packet |
 | [identity](src/identity/) | Our keypair and the contacts learned from adverts, plus a shared-secret cache. | core, packet |
 | [routing](src/routing/) | Flood and direct routing, deduplication, path learning, acks and retries. | identity, packet, protocol |
-| [room](src/room/) | The noticeboard: posts, clients, logins, access control, per-client sync, channels. | identity, routing, protocol |
+| [repeater](src/repeater/) | Transit policy: whether somebody else's packet is carried, and on what terms. | packet |
+| [room](src/room/) | The noticeboard: posts, clients, logins, access control, per-client sync, channels. | identity, routing, repeater, protocol |
 | [radio](src/radio/) | Airtime, duty cycle, TX queue, and the drivers. The only module that would know about SPI. | platform |
 | [platform](src/platform/) | Clock, file store, config, logging — the only system calls in the tree. | — |
 | [telemetry](src/telemetry/) | Event bus and counters. Switchable off with a flag; nothing else notices. | platform |
 
 `routing` never reads a clock — time arrives through `tick()`. `room` never sees
-a byte off the air. `routing` and `room` publish telemetry events to a bus and
-never call telemetry directly.
+a byte off the air. `repeater` reads neither: it is handed a packet, the time and
+how much airtime is gone, and answers yes or no. `routing` and `room` publish
+telemetry events to a bus and never call telemetry directly.
 
 ## Protocol notes
 
@@ -45,6 +47,11 @@ the per-hop hash size in the other two.
   because it grows on every hop.
 - A one-byte node hash is ambiguous by design, so a received packet is matched
   against every contact sharing that byte and settled by whose MAC checks out.
+- A trace is `tag(4) auth_code(4) flags(1)` and then one signed byte per hop,
+  quarter-decibels of SNR. The frame's own path already says who carried it, so
+  this says how well each of them heard it; the two are read side by side, and a
+  node that cannot append its reading stops the trace rather than sending one
+  where the two lists no longer line up.
 
 ## Build
 
@@ -72,12 +79,19 @@ stranger and nobody would notice), and an unsynchronised wall clock is fatal
 because a node advertising itself dated 1970 corrupts its neighbours' records.
 `SIGINT`/`SIGTERM` save contacts and room state on the way out.
 
+The contact file is at version 2, which keeps what the radio heard — when last,
+how well, how many hops away — beside what each advert claimed. Version 1 files
+are read and upgraded on the next save, their missing fields left empty until
+the next advert fills them in. Going back to an older build after that loses the
+contact list, not the identity.
+
 Configuration is [meshcore.json](meshcore.json); every key has a default:
 
 | Key | Meaning |
 | --- | --- |
 | `node.dir` | Where the identity, contacts and room state live |
 | `node.name` | Name advertised to the network |
+| `node.type` | `room` or `repeater` — what the network is told this node is for. Every node carries other people's packets whichever it says |
 | `node.flush_ms` | How often state is written (lazily — a write per advert would wear out the card) |
 | `node.advert_ms` | Advert interval |
 | `log.level` | `error`, `warn`, `info`, `debug` |
@@ -87,6 +101,14 @@ Configuration is [meshcore.json](meshcore.json); every key has a default:
 | `radio.udp_group`, `radio.udp_group_port` | Optional multicast, so a LAN needs no peer list |
 | `radio.frequency`, `radio.spreading_factor`, `radio.bandwidth`, `radio.coding_rate` | LoRa parameters; these must match the network bit for bit |
 | `radio.duty_cycle` | Percent per sliding hour (10 on 868 MHz in Europe) |
+| `routing.forward_airtime_factor`, `routing.forward_jitter` | Transit delay: airtime times the first, plus a random spread up to the second |
+| `routing.max_routes` | Learned direct routes kept at once |
+| `routing.seen_slots`, `routing.seen_ttl_ms` | The duplicate cache: how many packets are remembered, and for how long |
+| `repeater.enabled` | Whether other people's packets travel on at all |
+| `repeater.max_hops` | Transit stops past this many hops, below the 63 the format allows |
+| `repeater.per_source_per_minute` | Floods carried per neighbour per minute |
+| `repeater.duty_ceiling` | Permille of the sliding hour past which transit stands aside. `0` switches the check off |
+| `repeater.blocked` | Node hashes not carried for, `"1f"` each |
 | `room.admin_password`, `room.guest_password` | Empty means that role cannot log in |
 | `room.anonymous_read` | Let strangers read without a password |
 | `room.channels` | `"name:key"` each, the key 64 hex characters. Up to four |
@@ -112,9 +134,14 @@ resends the identical frame.
 | `set password <text>` | New admin password. Empty closes the role |
 | `set guest.password <text>` | The same for guests |
 | `set anonymous.read on\|off` | Reading without a password |
-| `get stats` | Posts, clients, uptime |
+| `set repeat on\|off` | Whether other people's packets travel on |
+| `set hops.max <n>` | How far a carried packet may have travelled already, 1..63 |
+| `get stats` | Posts, clients, uptime, packets carried and refused, airtime spent |
+| `get transit` | The same refusals broken out: hop limit, blocked, rate, budget |
+| `get neighbors` | Who this node hears first-hand, with signal and how long ago |
 | `get name`, `get time` | Read one value back |
 | `clear posts` | Empties the noticeboard, leaving the clients' bookmarks alone |
+| `clear stats` | Zeroes the transit counters. Changes nothing about what is carried |
 | `reboot` | Exits after the reply is on its way; the supervisor restarts the process |
 
 A post is pushed to a client as `name: text`, the name coming from the advert
@@ -122,6 +149,42 @@ that introduced the author and capped so the longest name plus the longest text
 still fit one frame — the text is what somebody wrote, so it is the name that
 gives way. An author no advert has been heard from becomes `?a1b2c3d4`, and a
 post that arrived on a channel has no author at all and gets no prefix.
+
+### Carrying other people's packets
+
+Every node here is a repeater as well as a board. A packet addressed to this
+node still travels on — the nodes behind it may have missed the original — and
+that is a separate branch in the receive path, never an `else`. What `node.type`
+changes is only what the advert claims: nothing on air says whether a node
+repeats, and clients look for a room server.
+
+Flood picks up our hash on the way through and stops if it comes back; direct is
+carried only when we are the next hop, and our hash is dropped from what remains.
+Either way transit waits behind everything of ours in the transmit queue, because
+repeating a stranger must never delay an answer we owe a client.
+
+What is not carried, and why, is the whole of [repeater](src/repeater/):
+
+- past `repeater.max_hops`, because a packet that has been through a dozen nodes
+  is going in circles;
+- more than `repeater.per_source_per_minute` floods from one neighbour, so a
+  wedged transmitter cannot spend the node's whole airtime. Direct packets are
+  not counted: they follow a route somebody already learned and arrive one at a
+  time, and they are the traffic this node exists to carry;
+- anything whose path touches a hash in `repeater.blocked`;
+- everything, once `repeater.duty_ceiling` of the sliding hour has gone. Our own
+  replies keep their air, which is the point of standing aside early rather than
+  letting the duty cycle stop us with a queue already full of strangers.
+
+Each of those is counted apart from the others, because "the repeater dropped
+four thousand packets" is not an answer and which counter moved is the
+diagnosis. `get transit` reads them back; `set repeat off` stops transit
+altogether and survives a restart, like every other setting an admin changes.
+
+A duplicate is remembered by hash for `routing.seen_ttl_ms`, not merely until
+the ring wraps: on a busy node `routing.seen_slots` entries wrap in seconds, and
+an echo arriving to a clean cache is forwarded a second time. The age also has
+to expire, or the same packet legitimately resent minutes later is swallowed.
 
 ### Channels
 
@@ -189,15 +252,16 @@ them all, labelling every log line with the node it came from. Ctrl-C stops the
 network with `SIGTERM`, so state is saved.
 
 ```sh
-./network.sh                  # three nodes, full mesh
-./network.sh -n 5 -t chain    # five nodes in a line, 1-2-3-4-5
-./network.sh -n 4 -t star -v  # hub plus three leaves, debug logging
-./network.sh -c               # wipe ./run first, so every node starts a stranger
+./network.sh                       # three nodes, full mesh
+./network.sh -n 5 -t chain         # five nodes in a line, 1-2-3-4-5
+./network.sh -n 5 -t chain -r 2,3,4  # the middle of that chain as repeaters
+./network.sh -n 4 -t star -v       # hub plus three leaves, debug logging
+./network.sh -c                    # wipe ./run first, so every node starts a stranger
 ```
 
 ## Tests
 
-Eight suites, one per module, on a [minimal harness](test/check.h) with no
+Nine suites, one per module, on a [minimal harness](test/check.h) with no
 framework and no dependencies. The virtual radio and the fake clock are what
 make them fast: a multi-node routing test runs in one process, and a timeout test
 does not take twelve seconds.

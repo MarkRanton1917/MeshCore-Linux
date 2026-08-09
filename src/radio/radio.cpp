@@ -89,7 +89,7 @@ bool TxQueue::push(ByteView frame, Priority priority)
   return true;
 }
 
-bool TxQueue::pop(std::vector<uint8_t>& out)
+bool TxQueue::pop(std::vector<uint8_t>& out, Priority* priority)
 {
   if (entries_.empty()) return false;
 
@@ -105,6 +105,7 @@ bool TxQueue::pop(std::vector<uint8_t>& out)
   }
 
   out = std::move(entries_[best].frame);
+  if (priority != nullptr) *priority = entries_[best].priority;
   entries_.erase(entries_.begin() + (long)best);
   return true;
 }
@@ -177,11 +178,14 @@ void VirtualRadio::tick(Millis now)
   if (!powered_) return;
 
   std::vector<uint8_t> frame;
-  while (queue_.pop(frame)) {
+  Priority priority = Priority::NORMAL;
+  while (queue_.pop(frame, &priority)) {
     const uint32_t airtime = airtimeUs(frame.size());
     if (!duty_.allows(now_, airtime)) {
-      // Budget spent: put it back and wait rather than break the rules.
-      queue_.push(ByteView { frame.data(), frame.size() }, Priority::HIGH);
+      // Budget spent: put it back and wait rather than break the rules. At the
+      // priority it had — promoting it would let a repeated stranger overtake
+      // the reply we owe a client.
+      queue_.push(ByteView { frame.data(), frame.size() }, priority);
       return;
     }
     duty_.record(now_, airtime);

@@ -139,6 +139,23 @@ struct GroupMsg {
   ByteView ciphertext;
 };
 
+// TRACE: tag(4) authCode(4) flags(1) snr(one signed byte per hop).
+//
+// The frame's own path already records who carried it; this records how well
+// each of them heard it, one byte per hop and in the same order, so the two
+// read together. Nothing above says what a trace tail must contain, so this
+// part is ours: a trace only means something to the node that started it, and
+// that node knows what it asked for.
+//
+// SNR is a signed count of quarter-decibels, which covers -32..+31 dB in the
+// one byte a hop can afford.
+struct Trace {
+  uint32_t tag = 0;
+  uint32_t authCode = 0;
+  uint8_t flags = 0;
+  ByteView snr;
+};
+
 // PATH: pathLength(1) path(n, one byte per hash) extraType(1) extra(rest).
 struct PathReturn {
   ByteView path;
@@ -189,5 +206,16 @@ std::optional<size_t> encodeGroup(const GroupMsg& g, ByteSpan out);
 // Returned path — room server as the end node.
 std::optional<PathReturn> decodePath(ByteView payload);
 std::optional<size_t> encodePath(const PathReturn& p, ByteSpan out);
+
+// Trace — every repeater on the way, which is what it is for.
+std::optional<Trace> decodeTrace(ByteView payload);
+std::optional<size_t> encodeTrace(const Trace& t, ByteSpan out);
+
+// Writes how we heard this trace into the packet, in place. False when the
+// payload is not a trace or the frame has no room for another hop — and then
+// the trace stops here rather than travelling on with a hop missing, because a
+// path and a list of signal readings that no longer line up is worse than a
+// trace that ends early.
+bool appendTraceHop(Packet& p, int16_t snrQuarterDb);
 
 } // namespace packet

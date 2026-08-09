@@ -334,6 +334,111 @@ static void testPersistence()
   removeDir(dir);
 }
 
+static void testNeighbours()
+{
+  section("identity: who we can actually hear");
+
+  const std::string dir = makeDir();
+  identity::Store store;
+  store.loadOrCreate(dir);
+
+  core::PublicKey near = keyWithHash(0x10, 0x01);
+  core::PublicKey nearer = keyWithHash(0x20, 0x02);
+  core::PublicKey behind = keyWithHash(0x30, 0x03);
+  core::PublicKey stranger = keyWithHash(0x40, 0x04);
+
+  std::vector<uint8_t> none;
+  store.remember(advertOf(near, 100, none));
+  store.remember(advertOf(nearer, 100, none));
+  store.remember(advertOf(behind, 100, none));
+
+  store.noteHeard(near, 5000, 7, 0);
+  store.noteHeard(nearer, 6000, -3, 0);
+  store.noteHeard(behind, 7000, 11, 2); // reached us through two other nodes
+
+  // A key nobody has introduced gets no slot: an advert is what makes a
+  // contact, and hearing a hash is not hearing a node.
+  store.noteHeard(stranger, 8000, 9, 0);
+  that("an unknown key is not invented", store.contactCount() == 3 && store.find(stranger) == nullptr);
+
+  std::vector<const identity::Contact*> list = store.neighbours(8);
+  that("only what we hear first-hand", list.size() == 2);
+  that("most recently heard first", list.size() == 2 && list[0]->hash() == 0x20 && list[1]->hash() == 0x10);
+  that("with the reading that came with it", !list.empty() && list[0]->snr == -3);
+
+  that("a limit is a limit", store.neighbours(1).size() == 1);
+  that("and zero asks for nothing", store.neighbours(0).empty());
+
+  const identity::Contact* distant = store.find(behind);
+  that("a contact behind a repeater is still a contact", distant != nullptr && distant->hops == 2);
+  that("but not a neighbour", distant != nullptr && !distant->isNeighbour());
+
+  // What the radio heard has to survive a restart, or every reboot reports an
+  // empty neighbourhood until the next round of adverts comes in.
+  that("flush succeeds", store.flush());
+  {
+    identity::Store reloaded;
+    that("reload succeeds", reloaded.loadOrCreate(dir));
+    const identity::Contact* again = reloaded.find(near);
+    that("link quality restored", again && again->lastHeard == 5000 && again->snr == 7 && again->hops == 0);
+    that("and the neighbour list with it", reloaded.neighbours(8).size() == 2);
+  }
+
+  removeDir(dir);
+}
+
+static void testVersionOneUpgrade()
+{
+  section("identity: a file written before link quality existed");
+
+  const std::string dir = makeDir();
+  {
+    identity::Store store;
+    store.loadOrCreate(dir);
+  }
+
+  // A version 1 record, by hand: everything up to the name and nothing after
+  // it. Reading one is the whole point of the version byte.
+  std::vector<uint8_t> blob { 1 };
+  core::PublicKey old = keyWithHash(0x55, 0x66);
+  blob.insert(blob.end(), old.data.begin(), old.data.end());
+  for (int i = 0; i < 4; i++)
+    blob.push_back((uint8_t)(1234 >> (8 * i)));
+  blob.push_back((uint8_t)identity::NodeType::REPEATER);
+  blob.push_back(0); // no location
+  for (int i = 0; i < 8; i++)
+    blob.push_back(0);
+  const std::string name = "old timer";
+  blob.push_back((uint8_t)name.size());
+  blob.insert(blob.end(), name.begin(), name.end());
+
+  const std::string path = dir + "/contacts.dat";
+  int fd = ::open(path.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0600);
+  ssize_t written = write(fd, blob.data(), blob.size());
+  close(fd);
+  that("wrote the old format", written == (ssize_t)blob.size());
+
+  identity::Store store;
+  that("it loads", store.loadOrCreate(dir));
+
+  const identity::Contact* contact = store.find(old);
+  that("with everything it did carry",
+    contact && contact->timestamp == 1234 && contact->name == "old timer"
+      && contact->type == identity::NodeType::REPEATER);
+
+  // Never heard from, as far as this node knows, which is the truth: the file
+  // it came from could not say.
+  that("and nothing it did not", contact && contact->lastHeard == 0 && !contact->isNeighbour());
+
+  that("saving upgrades the file", store.flush());
+  {
+    identity::Store reloaded;
+    that("and it reads back", reloaded.loadOrCreate(dir) && reloaded.find(old) != nullptr);
+  }
+
+  removeDir(dir);
+}
+
 static void testFlushWithoutLoad()
 {
   section("identity: flush before load");
@@ -354,6 +459,8 @@ int main()
   testFindByHash();
   testSecretCache();
   testPersistence();
+  testNeighbours();
+  testVersionOneUpgrade();
   testFlushWithoutLoad();
 
   return check::report();

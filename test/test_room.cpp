@@ -1227,6 +1227,147 @@ static void testSettingsReachTheHost()
   unlink((fixture.dir + "/overrides.json").c_str());
 }
 
+// An advert as identity would have taken it, so the store has a contact with a
+// name to show.
+static std::vector<uint8_t> namedAppdata(const std::string& name)
+{
+  std::vector<uint8_t> out { (uint8_t)(ADVERT_HAS_NAME | (uint8_t)identity::NodeType::CHAT) };
+  out.insert(out.end(), name.begin(), name.end());
+  return out;
+}
+
+static void testTransitCommands()
+{
+  section("room: driving the repeater over the air");
+
+  FakeAdmin admin;
+  repeater::Policy policy;
+
+  room::Config config = defaultConfig();
+  config.admin = &admin;
+  config.forwarder = &policy;
+
+  Fixture fixture(config);
+  auto& room = fixture.roomInstance;
+  room.setRadioLoad(43); // 4.3% of the sliding hour spent, well under the ceiling
+
+  const core::PublicKey adminKey = keyOf(0x22);
+  auto login = loginPayload(1000, 0, "admin-secret");
+  room.onAnon(adminKey, ByteView { login.data(), login.size() });
+  fixture.sender.sent.clear();
+
+  // Something to count, and something refused, so both numbers are real.
+  packet::Packet carried;
+  carried.header = (uint8_t)(((uint8_t)packet::PayloadType::TXT_MSG << 2) | (uint8_t)packet::RouteType::FLOOD);
+  carried.hopCount = 1;
+  that("the room carries what the policy allows", room.shouldForward(carried));
+
+  packet::Packet tooFar = carried;
+  tooFar.hopCount = MAX_HOP_COUNT;
+  that("and refuses what it will not", !room.shouldForward(tooFar));
+
+  runCommand(room, adminKey, 2000, "get stats");
+  const std::string stats = replyText(fixture.sender.sent.back());
+  that("stats count the board", contains(stats, "posts 0/32"));
+  that("and the transit", contains(stats, "fwd 1") && contains(stats, "refused 1"));
+  that("and how much air is left", contains(stats, "duty 4.3%"));
+
+  // Air spent is what the ceiling is for: past it the node keeps answering its
+  // own clients and stops carrying strangers.
+  room.setRadioLoad(500);
+  that("a spent budget stops transit", !room.shouldForward(carried));
+  room.setRadioLoad(43);
+  that("and it resumes when there is air again", room.shouldForward(carried));
+
+  runCommand(room, adminKey, 2001, "get transit");
+  const std::string transit = replyText(fixture.sender.sent.back());
+  that("the breakdown says which counter moved", contains(transit, "hops 1") && contains(transit, "blocked 0"));
+  that("and whether it is repeating at all", contains(transit, "repeat on"));
+
+  // Switching transit off has to outlive a restart, or the config file brings
+  // it back at the next start and the node quietly repeats again.
+  runCommand(room, adminKey, 2002, "set repeat off");
+  that("the reply says so", contains(replyText(fixture.sender.sent.back()), "OK - repeating off"));
+  that("the policy stopped", !policy.enabled() && !room.shouldForward(carried));
+  that("and the host stored it", admin.settings["repeater.enabled"] == "false");
+
+  runCommand(room, adminKey, 2003, "set repeat on");
+  that("and back on again", policy.enabled() && admin.settings["repeater.enabled"] == "true");
+
+  runCommand(room, adminKey, 2004, "set hops.max 5");
+  that("the limit moved", policy.maxHops() == 5 && admin.settings["repeater.max_hops"] == "5");
+
+  runCommand(room, adminKey, 2005, "set hops.max 0");
+  that("nonsense is refused", contains(replyText(fixture.sender.sent.back()), "ERR"));
+  that("and the limit is left alone", policy.maxHops() == 5);
+
+  runCommand(room, adminKey, 2006, "clear stats");
+  that("counters can be zeroed", policy.stats().forwarded == 0 && policy.stats().hopLimit == 0);
+
+  // Every key the commands hand over has to be one the config reads back, or
+  // the overlay shadows nothing.
+  platform::Config effective;
+  that("config parses", effective.loadFromString(R"({"repeater":{"enabled":true,"max_hops":12}})"));
+  platform::Overlay overlay(fixture.dir + "/overrides.json");
+  that("the host can store the switch", overlay.set("repeater.enabled", "false"));
+  that("and the limit", overlay.set("repeater.max_hops", "5"));
+  effective.applyOverlay(overlay);
+  that("both shadow the config",
+    !effective.getBool("repeater.enabled", true) && effective.getInt("repeater.max_hops") == 5);
+  unlink((fixture.dir + "/overrides.json").c_str());
+}
+
+static void testNeighbourCommand()
+{
+  section("room: who the node can hear");
+
+  FakeAdmin admin;
+  room::Config config = defaultConfig();
+  config.admin = &admin;
+
+  Fixture fixture(config);
+  auto& room = fixture.roomInstance;
+
+  const core::PublicKey adminKey = keyOf(0x22);
+  auto login = loginPayload(1000, 0, "admin-secret");
+  room.onAnon(adminKey, ByteView { login.data(), login.size() });
+
+  runCommand(room, adminKey, 2000, "get neighbors");
+  that("an empty neighbourhood says so", contains(replyText(fixture.sender.sent.back()), "no neighbours"));
+
+  core::PublicKey peer = keyOf(0x77);
+  const std::vector<uint8_t> extra = namedAppdata("hilltop");
+  packet::Advert advert;
+  advert.publicKey = peer.view();
+  advert.timestamp = 100;
+  advert.appdata = ByteView { extra.data(), extra.size() };
+  fixture.store.remember(advert);
+
+  // Heard 16 minutes before the server time the fixture set.
+  fixture.store.noteHeard(peer, 9040, -3, 0);
+
+  runCommand(room, adminKey, 2001, "get neighbors");
+  const std::string list = replyText(fixture.sender.sent.back());
+  that("the name is there", contains(list, "hilltop"));
+  that("with the hash", contains(list, "77"));
+  that("how well we hear it", contains(list, "-3dB"));
+  that("and how long ago", contains(list, "16m"));
+
+  // A contact several hops away is not somebody we can hear.
+  core::PublicKey distant = keyOf(0x88);
+  const std::vector<uint8_t> other = namedAppdata("faraway");
+  advert.publicKey = distant.view();
+  advert.appdata = ByteView { other.data(), other.size() };
+  fixture.store.remember(advert);
+  fixture.store.noteHeard(distant, 9500, 9, 3);
+
+  runCommand(room, adminKey, 2002, "get neighbours");
+  that("the far one is left out", !contains(replyText(fixture.sender.sent.back()), "faraway"));
+
+  // The British spelling answers too: half the clients will type it.
+  that("both spellings work", contains(replyText(fixture.sender.sent.back()), "hilltop"));
+}
+
 int main()
 {
   if (!core::init(nullptr)) {
@@ -1250,6 +1391,8 @@ int main()
   testEviction();
   testCommands();
   testSettingsReachTheHost();
+  testTransitCommands();
+  testNeighbourCommand();
 
   return check::report();
 }

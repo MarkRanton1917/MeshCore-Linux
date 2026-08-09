@@ -193,13 +193,15 @@ void UdpRadio::tick(Millis now)
   drainSocket();
 
   std::vector<uint8_t> frame;
-  while (queue_.pop(frame)) {
+  Priority priority = Priority::NORMAL;
+  while (queue_.pop(frame, &priority)) {
     if (frame.size() > MAX_PACKET_FRAME) continue; // cannot be a real frame
 
     const uint32_t airtime = airtimeUs(frame.size());
     if (!duty_.allows(now_, airtime)) {
-      // Budget spent: hold it rather than break the rules.
-      queue_.push(ByteView { frame.data(), frame.size() }, Priority::HIGH);
+      // Budget spent: hold it rather than break the rules, and at the priority
+      // it arrived with — see the same spot in VirtualRadio.
+      queue_.push(ByteView { frame.data(), frame.size() }, priority);
       return;
     }
     duty_.record(now_, airtime);

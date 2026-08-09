@@ -32,10 +32,12 @@ struct RxMeta {
 };
 
 // Acks and returned paths go ahead of other people's flood: they are short,
-// delay-sensitive, and decide whether the sender switches to direct.
+// delay-sensitive, and decide whether the sender switches to direct. Transit
+// comes last of all — repeating a stranger must never delay an answer we owe.
 enum class Priority {
   HIGH = 0,
-  NORMAL = 1
+  NORMAL = 1,
+  LOW = 2
 };
 
 // The radio owns the duty cycle budget and listen-before-talk. routing only
@@ -61,6 +63,16 @@ struct Delegate {
   {
     (void)type;
     (void)payload;
+  }
+
+  // A trace is unencrypted and addressed to nobody: it collects the route it
+  // travelled and means something only to the node that started it. Handed up
+  // decoded, with the path it has accumulated so far — the two are read
+  // together, one hash and one signal reading per hop.
+  virtual void onTrace(const packet::Trace& trace, ByteView path)
+  {
+    (void)trace;
+    (void)path;
   }
 
   virtual void onAck(SendId id) = 0;
@@ -100,6 +112,18 @@ struct Config {
 
   size_t maxPending = 32;
   size_t maxRoutes = 128;
+
+  // The duplicate cache. Sized from how long a flood takes to cross the
+  // network, not picked at random: if an echo comes back after its entry is
+  // gone we forward our own packet again, and that resonance reads as "the
+  // network is slow sometimes".
+  //
+  // A repeater on a busy node is why both are settings. Slots alone cannot say
+  // how long a packet is remembered — with enough traffic the ring wraps in
+  // seconds — so entries carry an age as well, and an entry past its age stops
+  // suppressing. Zero ttl remembers until the slot is reused.
+  size_t seenSlots = 128;
+  Millis seenTtl = 300000;
 
   // Optional. routing publishes and never calls telemetry back, so leaving
   // this null switches the whole thing off.

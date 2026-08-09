@@ -11,6 +11,7 @@
 #include "platform.h"
 #include "protocol.h"
 #include "radio.h"
+#include "repeater.h"
 #include "room.h"
 #include "routing.h"
 #include "telemetry.h"
@@ -46,10 +47,26 @@ public:
 
   void enqueue(ByteView frame, routing::Priority priority) override
   {
-    device_.send(frame, priority == routing::Priority::HIGH ? radio::Priority::HIGH : radio::Priority::NORMAL);
+    device_.send(frame, translate(priority));
   }
 
 private:
+  // Two enums with the same three levels, and neither module may name the
+  // other. The mapping is one switch rather than a cast, so adding a level to
+  // one of them fails to compile here instead of silently becoming HIGH.
+  static radio::Priority translate(routing::Priority priority)
+  {
+    switch (priority) {
+    case routing::Priority::HIGH:
+      return radio::Priority::HIGH;
+    case routing::Priority::LOW:
+      return radio::Priority::LOW;
+    case routing::Priority::NORMAL:
+      break;
+    }
+    return radio::Priority::NORMAL;
+  }
+
   radio::IRadio& device_;
 };
 
@@ -58,9 +75,10 @@ private:
 // policy, and policy belongs in the composition root.
 class Receiver : public radio::RxSink {
 public:
-  Receiver(identity::Store& store, telemetry::Bus& bus)
+  Receiver(identity::Store& store, telemetry::Bus& bus, platform::SystemClock& clock)
     : store_(store),
-      bus_(bus)
+      bus_(bus),
+      clock_(clock)
   {
   }
 
@@ -71,7 +89,7 @@ public:
 
   void onFrame(ByteView frame, const radio::RxMeta& meta) override
   {
-    rememberIfAdvert(frame, meta.at);
+    rememberIfAdvert(frame, meta);
 
     routing::RxMeta rx;
     rx.airtime = meta.airtimeUs / 1000;
@@ -80,7 +98,7 @@ public:
   }
 
 private:
-  void rememberIfAdvert(ByteView frame, platform::Millis at)
+  void rememberIfAdvert(ByteView frame, const radio::RxMeta& meta)
   {
     auto parsed = packet::parse(frame);
     if (!parsed.has_value()) return;
@@ -102,13 +120,21 @@ private:
 
     const identity::Update update = store_.remember(*advert);
     if (update == identity::Update::ADDED) {
-      bus_.publish(telemetry::EventType::ContactAdded, (uint32_t)(at / 1000));
+      bus_.publish(telemetry::EventType::ContactAdded, (uint32_t)(meta.at / 1000));
       platform::Log::write(platform::LogLevel::INFO, "new contact");
     }
+
+    // Even a stale advert says the node is alive and how well we hear it, so
+    // this is recorded whatever remember() made of the claim inside. An advert
+    // that arrived with an empty path came off that node's own transmitter.
+    core::PublicKey heard;
+    std::memcpy(heard.data.data(), advert->publicKey.data(), PACKET_PUBLIC_KEY_SIZE);
+    store_.noteHeard(heard, clock_.wall(), meta.snr, parsed->hopCount);
   }
 
   identity::Store& store_;
   telemetry::Bus& bus_;
+  platform::SystemClock& clock_;
   routing::Router* router_ = nullptr;
 };
 
@@ -229,10 +255,13 @@ private:
 
 // Our own advert: build it with an empty signature, sign the frame that
 // results, then put the signature back where it belongs.
-std::vector<uint8_t> buildAdvertPayload(const identity::Store& store, uint32_t timestamp, const std::string& name)
+std::vector<uint8_t> buildAdvertPayload(const identity::Store& store,
+  uint32_t timestamp,
+  const std::string& name,
+  identity::NodeType type)
 {
   std::vector<uint8_t> appdata;
-  appdata.push_back((uint8_t)((uint8_t)identity::NodeType::ROOM_SERVER | (name.empty() ? 0 : ADVERT_HAS_NAME)));
+  appdata.push_back((uint8_t)((uint8_t)type | (name.empty() ? 0 : ADVERT_HAS_NAME)));
   appdata.insert(appdata.end(), name.begin(), name.end());
 
   core::Signature blank {};
@@ -319,6 +348,36 @@ std::vector<room::Channel> channelsFrom(const std::vector<std::string>& entries)
     channels.push_back(std::move(channel));
   }
   return channels;
+}
+
+// What the network is told this node is. Only one value fits the four bits an
+// advert has for it, and a node that keeps a board is a room server first —
+// clients look for that, and nothing in an advert says whether a node repeats.
+// A pure repeater keeps no board and says so.
+identity::NodeType nodeTypeFromName(const std::string& name)
+{
+  if (name == "repeater") return identity::NodeType::REPEATER;
+  if (name == "room") return identity::NodeType::ROOM_SERVER;
+
+  platform::Log::write(platform::LogLevel::WARN, "unknown node.type '%s', advertising as a room server", name.c_str());
+  return identity::NodeType::ROOM_SERVER;
+}
+
+// "1f" or "0x1f", one node hash each. A hash and not a key: one byte is what a
+// packet carries, and blocking one blocks everybody who shares it.
+std::vector<uint8_t> blockedFrom(const std::vector<std::string>& entries)
+{
+  std::vector<uint8_t> blocked;
+  for (const std::string& entry : entries) {
+    unsigned value = 0;
+    if (std::sscanf(entry.c_str(), "%x", &value) != 1 || value > 0xFF) {
+      platform::Log::write(platform::LogLevel::ERROR, "blocked '%s' is not a node hash", entry.c_str());
+      continue;
+    }
+    blocked.push_back((uint8_t)value);
+    platform::Log::write(platform::LogLevel::WARN, "not carrying traffic for %02x", value);
+  }
+  return blocked;
 }
 
 platform::LogLevel levelFromName(const std::string& name)
@@ -428,7 +487,7 @@ int main(int argc, char** argv)
     return 1;
   }
 
-  Receiver receiver(store, bus);
+  Receiver receiver(store, bus, clock);
   device->setSink(&receiver);
 
   RadioLink link(*device);
@@ -436,9 +495,35 @@ int main(int argc, char** argv)
 
   routing::Config routingConfig;
   routingConfig.bus = telemetryOn ? &bus : nullptr;
+  routingConfig.forwardAirtimeFactor =
+    (uint32_t)config.getInt("routing.forward_airtime_factor", routingConfig.forwardAirtimeFactor);
+  routingConfig.forwardJitter =
+    (routing::Millis)config.getInt("routing.forward_jitter", (long)routingConfig.forwardJitter);
+  routingConfig.maxRoutes = (size_t)config.getInt("routing.max_routes", (long)routingConfig.maxRoutes);
+  routingConfig.seenSlots = (size_t)config.getInt("routing.seen_slots", (long)routingConfig.seenSlots);
+  routingConfig.seenTtl = (routing::Millis)config.getInt("routing.seen_ttl_ms", (long)routingConfig.seenTtl);
+
+  // Whether other people's packets travel on, and on what terms. The room asks
+  // it about every packet that lands; nothing else in the tree knows it exists.
+  repeater::Config transitConfig;
+  transitConfig.enabled = config.getBool("repeater.enabled", transitConfig.enabled);
+  transitConfig.maxHops = (uint8_t)config.getInt("repeater.max_hops", transitConfig.maxHops);
+  transitConfig.perSourcePerMinute =
+    (uint32_t)config.getInt("repeater.per_source_per_minute", transitConfig.perSourcePerMinute);
+  transitConfig.dutyCeilingPermille =
+    (uint32_t)config.getInt("repeater.duty_ceiling", transitConfig.dutyCeilingPermille);
+  transitConfig.blocked = blockedFrom(config.getList("repeater.blocked"));
+  repeater::Policy forwarder(transitConfig);
+
+  if (!forwarder.enabled()) {
+    // Worth saying out loud: a node that hears everything and passes nothing on
+    // looks exactly like a network with a hole in it.
+    platform::Log::write(platform::LogLevel::WARN, "transit is off, this node carries nothing for anybody");
+  }
 
   // Already the effective value: the overlay was laid over the config above.
   HostAdmin admin(config.get("node.name", "room"), overlay, clock.mono());
+  const identity::NodeType nodeType = nodeTypeFromName(config.get("node.type", "room"));
 
   room::Config roomConfig;
   roomConfig.adminPassword = config.get("room.admin_password");
@@ -446,6 +531,7 @@ int main(int argc, char** argv)
   roomConfig.allowAnonymousRead = config.getBool("room.anonymous_read", false);
   roomConfig.bus = telemetryOn ? &bus : nullptr;
   roomConfig.admin = &admin;
+  roomConfig.forwarder = &forwarder;
   roomConfig.channels = channelsFrom(config.getList("room.channels"));
   for (const room::Channel& channel : roomConfig.channels) {
     platform::Log::write(platform::LogLevel::INFO, "channel '%s', hash %02x", channel.name.c_str(), channel.hash);
@@ -474,7 +560,8 @@ int main(int argc, char** argv)
   platform::Millis nextAdvert = 0;
   platform::Millis nextReport = 0;
 
-  platform::Log::write(platform::LogLevel::INFO, "started as '%s'", admin.nodeName().c_str());
+  platform::Log::write(platform::LogLevel::INFO, "started as '%s', advertising as a %s", admin.nodeName().c_str(),
+    nodeType == identity::NodeType::REPEATER ? "repeater" : "room server");
 
   while (stopping == 0) {
     const platform::Millis now = clock.mono();
@@ -483,12 +570,17 @@ int main(int argc, char** argv)
     device->tick(now);
     router.tick(now);
     room.setServerTime(clock.wall());
+
+    // How much air has gone, so the transit policy can stand aside before the
+    // duty cycle does it for us — by then our own replies are queued behind
+    // other people's packets.
+    room.setRadioLoad(usedPermilleOf(*device));
     room.tick(now);
 
     // On the timer, or because a command asked for one — after a rename the
     // network holds the old name until the next advert goes out.
     if (now >= nextAdvert || admin.takeAdvertRequest()) {
-      const std::vector<uint8_t> payload = buildAdvertPayload(store, clock.wall(), admin.nodeName());
+      const std::vector<uint8_t> payload = buildAdvertPayload(store, clock.wall(), admin.nodeName(), nodeType);
       if (!payload.empty()) {
         router.sendFlood(packet::PayloadType::ADVERT, ByteView { payload.data(), payload.size() });
       }

@@ -31,9 +31,14 @@ struct RxSink {
   virtual void onFrame(ByteView frame, const RxMeta& meta) = 0;
 };
 
+// Three levels, and the third is the point: acks and returned paths ahead of
+// everything, our own traffic next, and other people's packets last. A node
+// that repeats at the same priority as it answers spends its air on strangers
+// while its own clients wait.
 enum class Priority {
   HIGH = 0,
-  NORMAL = 1
+  NORMAL = 1,
+  LOW = 2
 };
 
 struct IRadio {
@@ -103,7 +108,11 @@ public:
   explicit TxQueue(size_t depth);
 
   bool push(ByteView frame, Priority priority);
-  bool pop(std::vector<uint8_t>& out);
+
+  // The priority comes back with the frame, for the one caller that has to put
+  // it back: a transmission the duty cycle refused belongs where it was, not at
+  // the head of the queue.
+  bool pop(std::vector<uint8_t>& out, Priority* priority = nullptr);
   size_t size() const
   {
     return entries_.size();

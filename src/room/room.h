@@ -5,6 +5,7 @@
 #pragma once
 
 #include "identity.h"
+#include "repeater.h"
 #include "routing.h"
 #include "telemetry.h"
 
@@ -162,6 +163,10 @@ struct Config {
 
   // Optional too. Absent, the commands that reach outside the room refuse.
   Admin* admin = nullptr;
+
+  // Whether somebody else's packet travels on. Absent, everything does, which
+  // is what this node did before there was a policy to ask.
+  repeater::Policy* forwarder = nullptr;
 };
 
 class Room : public routing::Delegate {
@@ -170,6 +175,12 @@ public:
 
   // Server time is the truth: a Pi has NTP. Injected, never read here.
   void setServerTime(uint32_t unixSeconds);
+
+  // How much of the airtime budget is gone, in permille of the sliding window.
+  // Injected for the same reason as the clock — the room owns no radio — and
+  // used for one decision only: whether there is air left for other people's
+  // packets.
+  void setRadioLoad(uint32_t permille);
 
   bool load(const std::string& dir);
   bool flush();
@@ -257,6 +268,11 @@ private:
   void commandSet(const PublicKey& to, std::string_view rest);
   void commandGet(const PublicKey& to, std::string_view rest);
   void commandClear(const PublicKey& to, std::string_view rest);
+  // Who this node can hear first-hand, as one line that fits a reply. The
+  // repeater question an operator actually asks — "is anybody out there" —
+  // and the only command that reads the store rather than the room.
+  std::string neighbourList() const;
+
   void sendCliReply(const PublicKey& to, std::string_view text);
   void replyf(const PublicKey& to, const char* format, ...);
 
@@ -288,6 +304,7 @@ private:
 
   Millis now_ = 0;
   uint32_t serverTime_ = 0;
+  uint32_t radioLoad_ = 0;
   std::string dir_;
 
   std::vector<Post> posts_; // ring buffer, oldest first
