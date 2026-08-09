@@ -20,6 +20,38 @@ set(JSON_BuildTests OFF CACHE INTERNAL "")
 set(JSON_Install OFF CACHE INTERNAL "")
 add_subdirectory(lib/json EXCLUDE_FROM_ALL)
 
+add_subdirectory(lib/radiolib EXCLUDE_FROM_ALL)
+
+# Only the SX126x driver is needed; the rest is compiled out. PUBLIC because the
+# RadioLib headers are guarded by these same macros — a consumer that did not see
+# them would compile against a different library than the one it links against.
+target_compile_definitions(RadioLib PUBLIC
+  RADIOLIB_EXCLUDE_CC1101=1
+  RADIOLIB_EXCLUDE_NRF24=1
+  RADIOLIB_EXCLUDE_RF69=1
+  RADIOLIB_EXCLUDE_SX1231=1
+  RADIOLIB_EXCLUDE_SI443X=1
+  RADIOLIB_EXCLUDE_RFM2X=1
+  RADIOLIB_EXCLUDE_SX127X=1
+  # BuildOpt.h defines this one itself as (1) off-STM32 and does not guard it, so
+  # the value has to match token for token or every translation unit warns.
+  "RADIOLIB_EXCLUDE_STM32WLX=(1)"
+  RADIOLIB_EXCLUDE_SX128X=1
+  RADIOLIB_EXCLUDE_AFSK=1
+  RADIOLIB_EXCLUDE_AX25=1
+  RADIOLIB_EXCLUDE_HELLSCHREIBER=1
+  RADIOLIB_EXCLUDE_MORSE=1
+  RADIOLIB_EXCLUDE_RTTY=1
+  RADIOLIB_EXCLUDE_SSTV=1
+  RADIOLIB_EXCLUDE_DIRECT_RECEIVE=1
+  RADIOLIB_EXCLUDE_BELL=1
+  RADIOLIB_EXCLUDE_APRS=1
+  RADIOLIB_EXCLUDE_LORAWAN=1
+  RADIOLIB_EXCLUDE_LR11X0=1
+  RADIOLIB_EXCLUDE_FSK4=1
+  RADIOLIB_EXCLUDE_PAGER=1
+)
+
 add_library(meshcore
   src/packet/packet.cpp
   src/crypto/core.cpp
