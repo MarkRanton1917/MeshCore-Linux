@@ -108,6 +108,7 @@ uint32_t Room::sanitiseTimestamp(uint32_t claimed) const
 bool Room::addPost(const PublicKey& author, uint32_t timestamp, std::string_view text)
 {
   Post post;
+  post.seq = nextSeq_++;
   post.timestamp = sanitiseTimestamp(timestamp);
   std::memcpy(post.author.data(), author.data.data(), POST_AUTHOR_PREFIX);
 
@@ -172,7 +173,7 @@ void Room::onAnon(const PublicKey& from, ByteView plain)
 
   // The client's own bookmark, and we have to trust it: after reinstalling the
   // app it may legitimately ask for everything from zero.
-  client->syncSince = syncSince;
+  client->syncSeq = seqFromTimestamp(syncSince);
 
   if (config_.bus != nullptr) {
     config_.bus->publish(telemetry::EventType::ClientLogin, serverTime_);
@@ -606,17 +607,33 @@ void Room::commandClear(const PublicKey& to, std::string_view rest)
 
 // ------------------------------------------------------------------ push
 
-// A post counts as unsynced when it is newer than the client's bookmark and the
+// A post counts as unsynced when its seq is past the client's bookmark and the
 // client did not write it. Forgetting the second half looks like an echo to
 // every user.
+//
+// By seq, never by timestamp: posts arrive in the order they are stored, so the
+// scan is in order too, and no two of them can share a number.
 const Post* Room::nextPostFor(const Client& client) const
 {
   for (const Post& post : posts_) {
-    if (post.timestamp <= client.syncSince) continue;
+    if (post.seq <= client.syncSeq) continue;
     if (std::memcmp(post.author.data(), client.pk.data.data(), POST_AUTHOR_PREFIX) == 0) continue;
     return &post;
   }
   return nullptr;
+}
+
+uint32_t Room::seqFromTimestamp(uint32_t bookmark) const
+{
+  uint32_t seq = 0;
+  for (const Post& post : posts_) {
+    // Stop at the first one the client has not seen rather than carrying on:
+    // client clocks are not monotonic between each other, so an older post can
+    // sit behind a newer one, and skipping past it would lose it.
+    if (post.timestamp > bookmark) break;
+    seq = post.seq;
+  }
+  return seq;
 }
 
 Client* Room::nextClientToPush()
@@ -662,7 +679,7 @@ void Room::pushNextPost(Client& client)
   client.pendingId =
     sender_.sendDirect(client.pk, packet::PayloadType::TXT_MSG, ByteView { payload.data(), *size }, true);
   client.pending = true;
-  client.pendingPost = post->timestamp;
+  client.pendingSeq = post->seq;
 }
 
 // Only on acknowledgement. Moving the bookmark at send time means a lost packet
@@ -672,7 +689,7 @@ void Room::onAck(SendId id)
   for (Client& client : clients_) {
     if (!client.pending || client.pendingId != id) continue;
 
-    client.syncSince = client.pendingPost;
+    client.syncSeq = client.pendingSeq;
     client.pending = false;
     client.retryAfter = 0;
     return;
@@ -695,10 +712,16 @@ void Room::onDeliveryFailed(SendId id)
 // ------------------------------------------------------------------ storage
 
 //   byte 0        format version
-//   byte 1        post count
-//   posts:        timestamp(4) author(4) length(1) text
+//   version 2+:   nextSeq(4)
+//   byte          post count
+//   posts:        version 2+ seq(4), then timestamp(4) author(4) length(1) text
 //   byte          client count
-//   clients:      pk(32) access(1) syncSince(4) lastLogin(4)
+//   clients:      pk(32) access(1) bookmark(4) lastLogin(4)
+//
+// The bookmark is a seq from version 2 and was a timestamp in version 1; the
+// reader converts. nextSeq is saved rather than recomputed because the posts it
+// counted may all have been evicted from the ring, and starting over at 1 would
+// leave every new post looking already delivered to a client holding 40.
 //
 // Settings an admin changed over the air are not here: they live in the config
 // overlay, where a person can read them and delete them.
@@ -707,9 +730,11 @@ bool Room::writeState(const std::string& path) const
 {
   std::vector<uint8_t> blob;
   blob.push_back(ROOM_FORMAT_VERSION);
+  writeUint32(blob, nextSeq_);
 
   blob.push_back((uint8_t)posts_.size());
   for (const Post& post : posts_) {
+    writeUint32(blob, post.seq);
     writeUint32(blob, post.timestamp);
     blob.insert(blob.end(), post.author.begin(), post.author.end());
     blob.push_back((uint8_t)post.text.size());
@@ -720,7 +745,7 @@ bool Room::writeState(const std::string& path) const
   for (const Client& client : clients_) {
     blob.insert(blob.end(), client.pk.data.begin(), client.pk.data.end());
     blob.push_back((uint8_t)client.access);
-    writeUint32(blob, client.syncSince);
+    writeUint32(blob, client.syncSeq);
     writeUint32(blob, client.lastLogin);
   }
 
@@ -768,18 +793,38 @@ bool Room::readState(const std::string& path)
   }
   close(fd);
 
-  if (blob.size() < 2 || blob[0] != ROOM_FORMAT_VERSION) return false;
+  if (blob.size() < 2) return false;
+
+  const uint8_t version = blob[0];
+  if (version < ROOM_FORMAT_MIN_VERSION || version > ROOM_FORMAT_VERSION) return false;
 
   const ByteView view { blob.data(), blob.size() };
   size_t offset = 1;
 
+  // Version 1 knew no sequence numbers. Its posts get one each, in the order
+  // they were stored, which is the order they arrived in.
+  uint32_t nextSeq = 1;
+  if (version >= 2) {
+    if (view.size() - offset < 4) return false;
+    nextSeq = readUint32(view, offset);
+    offset += 4;
+  }
+
   std::vector<Post> posts;
+  if (view.size() - offset < 1) return false;
   const uint8_t postCount = view[offset++];
   if (postCount > MAX_POSTS) return false;
   for (uint8_t i = 0; i < postCount; i++) {
-    if (view.size() - offset < 4 + POST_AUTHOR_PREFIX + 1) return false;
+    if (view.size() - offset < (version >= 2 ? 4u : 0u) + 4 + POST_AUTHOR_PREFIX + 1) return false;
 
     Post post;
+    if (version >= 2) {
+      post.seq = readUint32(view, offset);
+      offset += 4;
+    }
+    else {
+      post.seq = nextSeq++;
+    }
     post.timestamp = readUint32(view, offset);
     offset += 4;
     std::memcpy(post.author.data(), view.data() + offset, POST_AUTHOR_PREFIX);
@@ -803,18 +848,34 @@ bool Room::readState(const std::string& path)
     std::memcpy(client.pk.data.data(), view.data() + offset, PACKET_PUBLIC_KEY_SIZE);
     offset += PACKET_PUBLIC_KEY_SIZE;
     client.access = (Access)view[offset++];
-    client.syncSince = readUint32(view, offset);
+
+    // A seq in version 2, a timestamp in version 1. Converted below, once the
+    // posts it has to be measured against are in place.
+    client.syncSeq = readUint32(view, offset);
     offset += 4;
     client.lastLogin = readUint32(view, offset);
     offset += 4;
     clients.push_back(std::move(client));
   }
 
+  // Never behind the posts on disk, whatever the header claimed: a nextSeq that
+  // repeats a number already in the ring would hand out the same bookmark twice.
+  for (const Post& post : posts) {
+    if (post.seq >= nextSeq) nextSeq = post.seq + 1;
+  }
+
   posts_ = std::move(posts);
   clients_ = std::move(clients);
+  nextSeq_ = nextSeq;
   posts_.reserve(MAX_POSTS);
   clients_.reserve(MAX_ROOM_CLIENTS);
   nextClientIdx_ = 0;
+
+  if (version < 2) {
+    for (Client& client : clients_) {
+      client.syncSeq = seqFromTimestamp(client.syncSeq);
+    }
+  }
   return true;
 }
 

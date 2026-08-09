@@ -413,14 +413,14 @@ static void testSyncFlow()
   that("nothing else while one is in flight", fixture.sender.sent.size() == 1);
 
   room.onAck(fixture.sender.sent[0].id);
-  that("bookmark moved on ack", room.findClient(reader) && room.findClient(reader)->syncSince == 10000);
+  that("bookmark moved on ack", room.findClient(reader) && room.findClient(reader)->syncSeq == 1);
 
   room.tick(1200);
   that("next post follows", fixture.sender.sent.size() == 2 && pushedText(fixture.sender.sent[1]) == "post 1");
 
   // A failed delivery must not move the bookmark.
   room.onDeliveryFailed(fixture.sender.sent[1].id);
-  that("bookmark unchanged after a failure", room.findClient(reader) && room.findClient(reader)->syncSince == 10000);
+  that("bookmark unchanged after a failure", room.findClient(reader) && room.findClient(reader)->syncSeq == 1);
 
   room.tick(1300);
   that("held back during the retry pause", fixture.sender.sent.size() == 2);
@@ -543,8 +543,14 @@ static void testPersistence()
 
     const room::Client* client = instance.findClient(author);
     that("rights restored", client && client->access == room::Access::GUEST);
-    that("bookmark restored", client && client->syncSince == 5);
+    that("bookmark restored", client && client->syncSeq == 0);
     that("replay guard restored", client && client->lastLogin == 1000);
+    that("the post kept its seq", instance.posts()[0].seq == 1);
+
+    // The counter has to survive too. Handing the next post seq 1 again would
+    // make it look already delivered to anyone bookmarked past it.
+    instance.addPost(keyOf(0x77), 10001, "after the restart");
+    that("the seq counter carried over", instance.posts()[1].seq == 2);
 
     // And it still refuses a replayed login after the restart.
     auto replay = loginPayload(1000, 0, "guest");
@@ -553,6 +559,52 @@ static void testPersistence()
   }
 
   removeDir(dir);
+}
+
+// Two posts inside one second are ordinary — a client sends both halves of a
+// thought, or two people answer at once. A bookmark that is a timestamp cannot
+// name the boundary between them, so the second was skipped for good.
+static void testSameSecondPosts()
+{
+  section("room: posts sharing a second");
+
+  Fixture fixture(defaultConfig());
+  auto& room = fixture.roomInstance;
+  auto& sent = fixture.sender.sent;
+
+  const core::PublicKey author = keyOf(0x11);
+  const core::PublicKey reader = keyOf(0x22);
+
+  auto authorLogin = loginPayload(1000, 0, "guest");
+  room.onAnon(author, ByteView { authorLogin.data(), authorLogin.size() });
+  auto readerLogin = loginPayload(1000, 0, "guest");
+  room.onAnon(reader, ByteView { readerLogin.data(), readerLogin.size() });
+  sent.clear();
+
+  for (const char* text : { "first", "second", "third" }) {
+    auto post = textPayload(10000, room::TextType::PLAIN, text);
+    room.onPayload(contactOf(author), packet::PayloadType::TXT_MSG, ByteView { post.data(), post.size() });
+  }
+  that("all three stored", room.postCount() == 3);
+  that("each got its own seq", room.posts()[0].seq == 1 && room.posts()[1].seq == 2 && room.posts()[2].seq == 3);
+  that("and they really do share a second", room.posts()[0].timestamp == room.posts()[2].timestamp);
+
+  // One per tick, each acknowledged, and none of them lost on the way.
+  std::vector<std::string> delivered;
+  for (int round = 0; round < 3; round++) {
+    room.tick((platform::Millis)(1000 + round * 100));
+    if (sent.empty()) break;
+
+    delivered.push_back(pushedText(sent.back()));
+    room.onAck(sent.back().id);
+  }
+
+  that("every post reached the reader", delivered.size() == 3);
+  that("in order, none skipped",
+    delivered.size() == 3 && delivered[0] == "first" && delivered[1] == "second" && delivered[2] == "third");
+
+  room.tick(2000);
+  that("and nothing is sent twice", sent.size() == 3);
 }
 
 static void testCommands()
@@ -780,6 +832,7 @@ int main()
   testRoundRobin();
   testRingBuffer();
   testPersistence();
+  testSameSecondPosts();
   testCommands();
   testSettingsReachTheHost();
 

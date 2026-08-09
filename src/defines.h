@@ -71,7 +71,10 @@
 #define MAX_PASSWORD 32
 #define MAX_NODE_NAME 32
 
-#define ROOM_FORMAT_VERSION 1
+// Version 2 gave posts a sequence number of their own; version 1 files are read
+// and upgraded, their timestamp bookmarks converted on the way in.
+#define ROOM_FORMAT_VERSION 2
+#define ROOM_FORMAT_MIN_VERSION 1
 
 // A reply has to fit one frame: 184 payload bytes, less the envelope, less what
 // AES padding rounds up, less the text prefix. 160 leaves room to spare.

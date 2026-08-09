@@ -82,6 +82,12 @@ enum class Action {
 };
 
 struct Post {
+  // Ours, monotonic, and the only thing synchronisation is allowed to count on.
+  // Timestamps come from client clocks: two posts can share one to the second,
+  // and a bookmark that is a timestamp then cannot name the boundary between
+  // them — whichever arrives second is skipped for good.
+  uint32_t seq = 0;
+
   uint32_t timestamp = 0;
   std::array<uint8_t, POST_AUTHOR_PREFIX> author {};
   std::string text;
@@ -90,12 +96,12 @@ struct Post {
 struct Client {
   PublicKey pk;
   Access access = Access::NONE;
-  uint32_t syncSince = 0; // everything up to here has been handed over
+  uint32_t syncSeq = 0; // everything up to this seq has been handed over
   uint32_t lastLogin = 0; // replay guard for the login packet
   uint32_t lastCommand = 0; // and for commands, which are worth replaying
   bool pending = false;
   SendId pendingId = 0;
-  uint32_t pendingPost = 0; // timestamp of the post in flight
+  uint32_t pendingSeq = 0; // seq of the post in flight
   Millis retryAfter = 0;
 };
 
@@ -178,6 +184,13 @@ public:
 private:
   bool handleText(const identity::Contact& from, ByteView plain);
   const Post* nextPostFor(const Client& client) const;
+
+  // A client bookmarks by time — it has never heard of our sequence numbers —
+  // so a login has to be translated. Deliberately cautious: it stops at the
+  // first post the client has not seen, even if later ones are older still.
+  // Handing over a post twice is a duplicate; skipping one loses it.
+  uint32_t seqFromTimestamp(uint32_t bookmark) const;
+
   void sendLoginResponse(const PublicKey& to, const Client& client);
 
   // Commands split off one per verb; the dispatcher stays readable and each one
@@ -204,6 +217,10 @@ private:
   std::vector<Post> posts_; // ring buffer, oldest first
   std::vector<Client> clients_;
   size_t nextClientIdx_ = 0;
+
+  // Saved with the state. Restarting at 1 while a client still holds a bookmark
+  // of 40 would leave every new post looking already delivered.
+  uint32_t nextSeq_ = 1;
 };
 
 } // namespace room
