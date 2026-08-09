@@ -71,6 +71,13 @@
 #define MAX_ROOM_CLIENTS 64
 #define MAX_PASSWORD 32
 
+// A pushed post reads "name: text". The name is capped so that the longest
+// possible one plus the longest possible text still fits a single frame — the
+// text is what somebody wrote, and truncating that to fit a long nickname would
+// be the wrong way round.
+#define MAX_POST_AUTHOR_NAME 16
+#define MAX_PUSH_BODY 170
+
 // Keys currently being made to wait after wrong passwords. Bounded like
 // everything else here, and small: the table is a speed bump, not a ledger.
 #define MAX_LOGIN_FAILURES 32

@@ -897,6 +897,51 @@ uint32_t Room::seqFromTimestamp(uint32_t bookmark) const
   return seq;
 }
 
+// Only four bytes of the author's key are kept with a post, so the name is
+// looked up the same way a packet finds its sender: the candidates sharing the
+// leading byte, settled by comparing the whole stored prefix.
+std::string Room::authorNameOf(const Post& post) const
+{
+  for (const identity::Contact* candidate : store_.findByHash(post.author[0])) {
+    if (std::memcmp(candidate->pk.data.data(), post.author.data(), POST_AUTHOR_PREFIX) != 0) continue;
+    if (candidate->name.empty()) break;
+    return candidate->name.substr(0, MAX_POST_AUTHOR_NAME);
+  }
+  return {};
+}
+
+// What the client is actually shown: "name: text".
+//
+// The four raw key bytes this used to send instead were a field only the room
+// understood, and every client rendered them as four bytes of rubbish in front
+// of the message. If a client turns out to want something else, this function
+// is the only place that decides.
+std::string Room::pushBodyFor(const Post& post) const
+{
+  std::string body;
+
+  // A post that arrived on a channel has no author key at all — whoever typed
+  // it is only ever whatever the text says — so it gets no prefix.
+  const std::array<uint8_t, POST_AUTHOR_PREFIX> nobody {};
+  if (post.author != nobody) {
+    const std::string name = authorNameOf(post);
+    if (!name.empty()) {
+      body = name;
+    }
+    else {
+      // Never heard an advert from them, or they advertise without a name.
+      // The stored prefix is at least stable, and stable beats blank.
+      char id[2 * POST_AUTHOR_PREFIX + 2];
+      std::snprintf(id, sizeof id, "?%02x%02x%02x%02x", post.author[0], post.author[1], post.author[2], post.author[3]);
+      body = id;
+    }
+    body += ": ";
+  }
+
+  body += post.text;
+  return body.substr(0, MAX_PUSH_BODY);
+}
+
 Client* Room::nextClientToPush()
 {
   if (clients_.empty()) return nullptr;
@@ -928,10 +973,8 @@ void Room::pushNextPost(Client& client)
   message.txtType = (uint8_t)TextType::SIGNED;
   message.attempt = 0;
 
-  std::vector<uint8_t> body;
-  body.insert(body.end(), post->author.begin(), post->author.end());
-  body.insert(body.end(), post->text.begin(), post->text.end());
-  message.message = ByteView { body.data(), body.size() };
+  const std::string body = pushBodyFor(*post);
+  message.message = ByteView { (const uint8_t*)body.data(), body.size() };
 
   std::vector<uint8_t> payload(MAX_PACKET_PAYLOAD);
   auto size = packet::encodeText(message, ByteSpan { payload.data(), payload.size() });

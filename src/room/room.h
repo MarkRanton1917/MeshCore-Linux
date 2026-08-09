@@ -237,6 +237,12 @@ private:
 
   const Post* nextPostFor(const Client& client) const;
 
+  // What a client is shown for a post: "name: text". The only place that
+  // decides, so a client wanting something else is one function to change.
+  std::string pushBodyFor(const Post& post) const;
+  std::string authorNameOf(const Post& post) const;
+
+
   // A client bookmarks by time — it has never heard of our sequence numbers —
   // so a login has to be translated. Deliberately cautious: it stops at the
   // first post the client has not seen, even if later ones are older still.

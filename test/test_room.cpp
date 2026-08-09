@@ -237,13 +237,20 @@ static bool contains(const std::string& haystack, const std::string& needle)
   return haystack.find(needle) != std::string::npos;
 }
 
-// The post text a client actually receives, minus the author prefix.
-static std::string pushedText(const Outgoing& out)
+// Everything a client receives for a post, "name: " and all.
+static std::string pushedBody(const Outgoing& out)
 {
   auto message = packet::decodeText(ByteView { out.payload.data(), out.payload.size() });
-  if (!message.has_value() || message->message.size() < POST_AUTHOR_PREFIX) return {};
-  return std::string(
-    (const char*)message->message.data() + POST_AUTHOR_PREFIX, message->message.size() - POST_AUTHOR_PREFIX);
+  if (!message.has_value()) return {};
+  return std::string((const char*)message->message.data(), message->message.size());
+}
+
+// And the message on its own, which is what most of these tests care about.
+static std::string pushedText(const Outgoing& out)
+{
+  const std::string body = pushedBody(out);
+  const size_t colon = body.find(": ");
+  return colon == std::string::npos ? body : body.substr(colon + 2);
 }
 
 // ------------------------------------------------------------------ tests
@@ -719,6 +726,74 @@ static void testRequests()
 // signs anything. So what arrives may become a post and nothing else, and what
 // the board receives directly goes back out so the two do not drift apart.
 // Guessing a password over the air is slow but free, and nobody is watching.
+// A post is pushed as "name: text". The four raw key bytes this used to send
+// were a field only the room understood, and every client rendered them as four
+// bytes of rubbish in front of the message.
+static void testAuthorPrefix()
+{
+  section("room: the author a client sees");
+
+  Fixture fixture(defaultConfig());
+  auto& room = fixture.roomInstance;
+  auto& sent = fixture.sender.sent;
+
+  // An advert is how a name is learned, so the store has to hear one first.
+  const core::PublicKey author = keyOf(0x11);
+  packet::Advert advert;
+  advert.publicKey = author.view();
+  advert.timestamp = 100;
+  const std::vector<uint8_t> appdata = { ADVERT_HAS_NAME | 1, 'A', 'l', 'i', 'c', 'e' };
+  advert.appdata = ByteView { appdata.data(), appdata.size() };
+  fixture.store.remember(advert);
+
+  const core::PublicKey reader = keyOf(0x22);
+  auto login = loginPayload(1000, 0, "guest");
+  room.onAnon(reader, ByteView { login.data(), login.size() });
+  sent.clear();
+
+  room.addPost(author, 10000, "hello");
+  room.tick(1000);
+  that("the name leads the message", sent.size() == 1 && pushedBody(sent[0]) == "Alice: hello");
+  room.onAck(sent.back().id);
+  sent.clear();
+
+  // Somebody we have never heard an advert from: stable beats blank.
+  const core::PublicKey unknown = keyOf(0xAB);
+  room.addPost(unknown, 10001, "who am i");
+  room.tick(1100);
+  that("an unknown author falls back to the stored prefix",
+    sent.size() == 1 && pushedBody(sent[0]) == "?abababab: who am i");
+  room.onAck(sent.back().id);
+  sent.clear();
+
+  // A channel post has no author key at all, so there is nothing to put there.
+  const core::PublicKey nobody {};
+  room.addPost(nobody, 10002, "over the channel");
+  room.tick(1200);
+  that("a channel post gets no prefix", sent.size() == 1 && pushedBody(sent[0]) == "over the channel");
+  room.onAck(sent.back().id);
+  sent.clear();
+
+  // The longest name and the longest text still have to fit one frame, and it
+  // is the name that gives way, not what somebody wrote.
+  const core::PublicKey verbose = keyOf(0x33);
+  packet::Advert loud;
+  loud.publicKey = verbose.view();
+  loud.timestamp = 100;
+  std::vector<uint8_t> longName = { ADVERT_HAS_NAME | 1 };
+  for (int i = 0; i < 40; i++)
+    longName.push_back('x');
+  loud.appdata = ByteView { longName.data(), longName.size() };
+  fixture.store.remember(loud);
+
+  const std::string longest(MAX_POST_TEXT, 'y');
+  room.addPost(verbose, 10003, longest);
+  room.tick(1300);
+  that("the name is capped", sent.size() == 1 && pushedBody(sent[0]).find(':') == MAX_POST_AUTHOR_NAME);
+  that("and the text survives whole", sent.size() == 1 && pushedText(sent[0]) == longest);
+  that("the whole body still fits a frame", sent.size() == 1 && pushedBody(sent[0]).size() <= MAX_PUSH_BODY);
+}
+
 static void testLoginLockout()
 {
   section("room: wrong passwords");
@@ -1170,6 +1245,7 @@ int main()
   testSameSecondPosts();
   testRequests();
   testChannels();
+  testAuthorPrefix();
   testLoginLockout();
   testEviction();
   testCommands();

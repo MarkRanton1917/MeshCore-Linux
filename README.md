@@ -117,6 +117,12 @@ resends the identical frame.
 | `clear posts` | Empties the noticeboard, leaving the clients' bookmarks alone |
 | `reboot` | Exits after the reply is on its way; the supervisor restarts the process |
 
+A post is pushed to a client as `name: text`, the name coming from the advert
+that introduced the author and capped so the longest name plus the longest text
+still fit one frame — the text is what somebody wrote, so it is the name that
+gives way. An author no advert has been heard from becomes `?a1b2c3d4`, and a
+post that arrived on a channel has no author at all and gets no prefix.
+
 ### Channels
 
 A channel is a key and a name, configured as one string per channel:
