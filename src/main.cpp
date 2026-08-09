@@ -14,6 +14,7 @@
 #include <csignal>
 #include <cstdio>
 #include <cstring>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -87,6 +88,14 @@ private:
     auto advert = packet::decodeAdvert(parsed->payloadView());
     if (!advert.has_value()) return;
 
+    // Our own advert, handed back by a neighbour that forwarded it. Recording
+    // it would waste a slot and put us in our own hash bucket, where every
+    // packet from a node sharing our first byte would try to decrypt against a
+    // secret shared with ourselves.
+    if (std::memcmp(advert->publicKey.data(), store_.selfPk().data.data(), PACKET_PUBLIC_KEY_SIZE) == 0) {
+      return;
+    }
+
     const identity::Update update = store_.remember(*advert);
     if (update == identity::Update::ADDED) {
       bus_.publish(telemetry::EventType::ContactAdded, (uint32_t)(at / 1000));
@@ -151,6 +160,47 @@ std::vector<uint8_t> buildAdvertPayload(const identity::Store& store, uint32_t t
   return payload;
 }
 
+// "a, b, c" -> {"a", "b", "c"}
+std::vector<std::string> splitList(const std::string& text)
+{
+  std::vector<std::string> parts;
+  size_t start = 0;
+  while (start <= text.size()) {
+    const size_t comma = text.find(',', start);
+    const size_t end = comma == std::string::npos ? text.size() : comma;
+
+    size_t from = start;
+    size_t to = end;
+    while (from < to && (text[from] == ' ' || text[from] == '\t'))
+      from++;
+    while (to > from && (text[to - 1] == ' ' || text[to - 1] == '\t'))
+      to--;
+    if (to > from) parts.push_back(text.substr(from, to - from));
+
+    if (comma == std::string::npos) break;
+    start = comma + 1;
+  }
+  return parts;
+}
+
+// Neither gauge belongs on IRadio: they are diagnostics, not something the
+// stack above may steer by.
+uint32_t queueDepthOf(const radio::IRadio& device)
+{
+  if (auto* udp = dynamic_cast<const radio::UdpRadio*>(&device)) return (uint32_t)udp->queueDepth();
+  if (auto* fake = dynamic_cast<const radio::VirtualRadio*>(&device)) {
+    return (uint32_t)fake->queueDepth();
+  }
+  return 0;
+}
+
+uint32_t usedPermilleOf(const radio::IRadio& device)
+{
+  if (auto* udp = dynamic_cast<const radio::UdpRadio*>(&device)) return udp->usedPermille();
+  if (auto* fake = dynamic_cast<const radio::VirtualRadio*>(&device)) return fake->usedPermille();
+  return 0;
+}
+
 platform::LogLevel levelFromName(const std::string& name)
 {
   if (name == "error") return platform::LogLevel::ERROR;
@@ -209,16 +259,41 @@ int main(int argc, char** argv)
   params.codingRate = (uint8_t)config.getInt("radio.coding_rate", params.codingRate);
   params.dutyCyclePercent = (uint8_t)config.getInt("radio.duty_cycle", params.dutyCyclePercent);
 
-  // Only the virtual device exists so far: the SX1262 driver needs RadioLib on
-  // real hardware. Swapping it in is one line, because everything above talks
-  // to IRadio and nothing else.
+  // Everything above talks to IRadio and nothing else, so the driver is a
+  // choice made here and nowhere else. The SX1262 one still needs RadioLib on
+  // real hardware.
+  const std::string driver = config.get("radio.driver", "virtual");
+
   radio::Medium medium;
-  radio::VirtualRadio device(medium, params);
+  std::unique_ptr<radio::IRadio> device;
+
+  if (driver == "udp") {
+    radio::UdpOptions udp;
+    udp.bindAddress = config.get("radio.udp_bind", "127.0.0.1");
+    udp.listenPort = (uint16_t)config.getInt("radio.udp_port", 0);
+    udp.peers = splitList(config.get("radio.udp_peers"));
+    udp.multicastGroup = config.get("radio.udp_group");
+    udp.multicastPort = (uint16_t)config.getInt("radio.udp_group_port", 4242);
+
+    auto udpDevice = std::make_unique<radio::UdpRadio>(udp, params);
+    if (!udpDevice->open()) {
+      platform::Log::write(platform::LogLevel::ERROR, "radio unavailable, refusing to start");
+      return 1;
+    }
+    device = std::move(udpDevice);
+  }
+  else if (driver == "virtual") {
+    device = std::make_unique<radio::VirtualRadio>(medium, params);
+  }
+  else {
+    platform::Log::write(platform::LogLevel::ERROR, "unknown radio.driver '%s'", driver.c_str());
+    return 1;
+  }
 
   Receiver receiver(store, bus);
-  device.setSink(&receiver);
+  device->setSink(&receiver);
 
-  RadioLink link(device);
+  RadioLink link(*device);
   RouterSender sender;
 
   routing::Config routingConfig;
@@ -259,7 +334,7 @@ int main(int argc, char** argv)
   while (stopping == 0) {
     const platform::Millis now = clock.mono();
 
-    device.tick(now);
+    device->tick(now);
     router.tick(now);
     room.setServerTime(clock.wall());
     room.tick(now);
@@ -282,7 +357,8 @@ int main(int argc, char** argv)
 
     if (telemetryOn && now >= nextReport) {
       collector.drain(bus);
-      collector.observe((uint32_t)device.queueDepth(), device.usedPermille());
+      // Both gauges come from whichever driver is in use.
+      collector.observe(queueDepthOf(*device), usedPermilleOf(*device));
       telemetry::logCounters(collector.counters());
       nextReport = now + reportEvery;
     }

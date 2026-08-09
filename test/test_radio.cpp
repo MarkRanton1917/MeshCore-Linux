@@ -189,6 +189,70 @@ static void testReplayRadio()
     replay.send(view(outgoing)) && replay.transmitted().size() == 1 && replay.transmitted()[0] == outgoing);
 }
 
+static void testUdpRadio()
+{
+  section("radio: udp transport");
+
+  // Two nodes on the loopback, each listing the other as a peer. The peer
+  // lists are the topology.
+  radio::Params params;
+  params.dutyCyclePercent = 100;
+
+  radio::UdpOptions left;
+  left.listenPort = 45501;
+  radio::UdpOptions right;
+  right.listenPort = 45502;
+  left.peers = { "127.0.0.1:45502" };
+  right.peers = { "127.0.0.1:45501" };
+
+  radio::UdpRadio a(left, params);
+  radio::UdpRadio b(right, params);
+  that("both sockets open", a.open() && b.open());
+  that("bound where asked", a.boundPort() == 45501 && b.boundPort() == 45502);
+
+  Collecting sinkA, sinkB;
+  a.setSink(&sinkA);
+  b.setSink(&sinkB);
+
+  std::vector<uint8_t> frame { 0x11, 0x00, 1, 2, 3 };
+  that("send only queues", a.send(view(frame)) && sinkB.frames.empty());
+
+  a.tick(100);
+  b.tick(110);
+  that("the peer received it", sinkB.frames.size() == 1);
+  that("frame arrives intact", sinkB.frames.size() == 1 && sinkB.frames[0] == frame);
+  that("airtime is reported", sinkB.metas.size() == 1 && sinkB.metas[0].airtimeUs == b.airtimeUs(frame.size()));
+
+  // The sender id exists exactly to stop this.
+  a.tick(120);
+  that("the sender does not hear itself", sinkA.frames.empty());
+
+  std::vector<uint8_t> reply { 0x15, 0x00, 9 };
+  b.send(view(reply));
+  b.tick(200);
+  a.tick(210);
+  that("the reverse direction works", sinkA.frames.size() == 1 && sinkA.frames[0] == reply);
+
+  // A node nobody lists cannot be heard by anyone.
+  radio::UdpOptions lonely;
+  lonely.listenPort = 45503;
+  radio::UdpRadio outsider(lonely, params);
+  Collecting sinkOutsider;
+  outsider.setSink(&sinkOutsider);
+  that("an unlisted node opens", outsider.open());
+
+  a.send(view(frame));
+  a.tick(300);
+  outsider.tick(310);
+  that("and hears nothing", sinkOutsider.frames.empty());
+
+  radio::UdpOptions broken;
+  broken.listenPort = 45504;
+  broken.peers = { "not-an-address" };
+  radio::UdpRadio invalid(broken, params);
+  that("a malformed peer is refused", !invalid.open());
+}
+
 int main()
 {
   testAirtime();
@@ -196,5 +260,6 @@ int main()
   testTxQueue();
   testVirtualRadio();
   testReplayRadio();
+  testUdpRadio();
   return check::report();
 }

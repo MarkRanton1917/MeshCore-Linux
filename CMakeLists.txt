@@ -26,6 +26,7 @@ add_library(meshcore
   src/room/room.cpp
   src/platform/platform.cpp
   src/radio/radio.cpp
+  src/radio/udp_radio.cpp
   src/telemetry/telemetry.cpp
 )
 

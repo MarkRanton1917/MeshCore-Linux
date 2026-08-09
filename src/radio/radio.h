@@ -1,10 +1,12 @@
 #pragma once
 
+#include "core.h"
 #include "platform.h"
 
 #include <cstdint>
 #include <deque>
 #include <memory>
+#include <string>
 #include <vector>
 
 // The only module that knows about SPI, GPIO and physics. Everything above it
@@ -168,6 +170,80 @@ private:
   size_t index_ = 0;
   Millis now_ = 0;
   bool powered_ = true;
+};
+
+// Several processes on one machine, or several machines on a LAN. Each node
+// lists the peers it can hear, so the peer lists are the visibility matrix:
+// a chain A-R-C is three configs, not a special mode.
+struct UdpOptions {
+  std::string bindAddress = "127.0.0.1";
+  uint16_t listenPort = 0; // 0 lets the kernel choose
+
+  // "host:port" each. Where this node's transmissions go, and therefore who
+  // hears it.
+  std::vector<std::string> peers;
+
+  // Optional. Joined for receiving and added to the peers for sending, so a
+  // LAN needs no peer list at all — where multicast is available.
+  std::string multicastGroup;
+  uint16_t multicastPort = 4242;
+};
+
+// UDP transport for the test bench. Datagrams carry an 8-byte sender id ahead
+// of the frame: with multicast loopback, and with a peer list that includes
+// ourselves, we would otherwise receive our own transmissions. That header
+// belongs to this transport and never reaches the protocol.
+class UdpRadio : public IRadio {
+public:
+  UdpRadio(UdpOptions options, Params params = {});
+  ~UdpRadio() override;
+
+  // Opens the socket. False leaves the reason in the log.
+  bool open();
+  uint16_t boundPort() const
+  {
+    return boundPort_;
+  }
+
+  bool send(ByteView frame, Priority priority = Priority::NORMAL) override;
+  void tick(Millis now) override;
+  void setSink(RxSink* sink) override
+  {
+    sink_ = sink;
+  }
+  uint32_t airtimeUs(size_t length) const override;
+  bool canTransmitNow() const override;
+
+  size_t queueDepth() const
+  {
+    return queue_.size();
+  }
+  uint32_t usedPermille() const
+  {
+    return duty_.usedPermille(now_);
+  }
+
+private:
+  void drainSocket();
+  void transmit(ByteView frame);
+
+  UdpOptions options_;
+  Params params_;
+  DutyCycle duty_;
+  TxQueue queue_;
+  RxSink* sink_ = nullptr;
+
+  // Kept as plain numbers so no socket header leaks into this interface.
+  struct Endpoint {
+    uint32_t address = 0; // network byte order
+    uint16_t port = 0;
+  };
+
+  int socket_ = -1;
+  uint16_t boundPort_ = 0;
+  uint64_t selfId_ = 0;
+  Millis now_ = 0;
+  std::vector<Endpoint> destinations_;
 };
 
 // Replays a captured dump with its original timing. What you reach for when a
