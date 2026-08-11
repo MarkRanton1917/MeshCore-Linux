@@ -23,7 +23,7 @@ Files: [repeater.h](repeater.h), [repeater.cpp](repeater.cpp). Tests:
 - **`enabled`** — whether other people's packets travel on at all.
 - **`maxHops`** (default 12) — deliberately below the `MAX_HOP_COUNT` of 63 the
   format allows. A packet already through a dozen nodes is lost rather than late.
-- **`perSourcePerMinute`** (default 30) — floods per previous hop, per minute. One
+- **`floodPerMinute`** (default 30) — floods per previous hop, per minute. One
   neighbour with a wedged transmitter must not spend the whole node's airtime.
   Direct packets are not counted: they follow a route somebody already learned and
   arrive one at a time, and they are the traffic this node exists to carry.
@@ -88,7 +88,7 @@ needs evicting.
 - **`maxHops`** (по умолчанию 12) — намеренно меньше, чем `MAX_HOP_COUNT` = 63,
   который допускает формат. Пакет, прошедший десяток узлов, лучше потерять, чем
   доставить с опозданием.
-- **`perSourcePerMinute`** (по умолчанию 30) — лавинных пакетов от одного
+- **`floodPerMinute`** (по умолчанию 30) — лавинных пакетов от одного
   предыдущего перехода в минуту. Один сосед с заклинившим передатчиком не должен
   тратить всё эфирное время узла. Прямые пакеты не считаются: они идут по уже
   выученному кем-то маршруту, приходят по одному, и ради них узел и существует.

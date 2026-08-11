@@ -108,7 +108,7 @@ Configuration is [meshcore.json](meshcore.json); every key has a default:
 | `routing.seen_slots`, `routing.seen_ttl_ms` | The duplicate cache: how many packets are remembered, and for how long |
 | `repeater.enabled` | Whether other people's packets travel on at all |
 | `repeater.max_hops` | Transit stops past this many hops, below the 63 the format allows |
-| `repeater.per_source_per_minute` | Floods carried per neighbour per minute |
+| `repeater.flood_per_minute` | Floods carried per neighbour per minute |
 | `repeater.duty_ceiling` | Permille of the sliding hour past which transit stands aside. `0` switches the check off |
 | `repeater.blocked` | Node hashes not carried for, `"1f"` each |
 | `room.admin_password`, `room.guest_password` | Empty means that role cannot log in |
@@ -169,7 +169,7 @@ What is not carried, and why, is the whole of [repeater](src/repeater/):
 
 - past `repeater.max_hops`, because a packet that has been through a dozen nodes
   is going in circles;
-- more than `repeater.per_source_per_minute` floods from one neighbour, so a
+- more than `repeater.flood_per_minute` floods from one neighbour, so a
   wedged transmitter cannot spend the node's whole airtime. Direct packets are
   not counted: they follow a route somebody already learned and arrive one at a
   time, and they are the traffic this node exists to carry;
@@ -402,7 +402,7 @@ UndefinedBehaviorSanitizer.
 | `routing.seen_slots`, `routing.seen_ttl_ms` | Кеш дубликатов: сколько пакетов помнить и как долго |
 | `repeater.enabled` | Идут ли чужие пакеты дальше вообще |
 | `repeater.max_hops` | Транзит прекращается после такого числа переходов; меньше, чем 63, которые допускает формат |
-| `repeater.per_source_per_minute` | Сколько лавинных пакетов переносится на соседа в минуту |
+| `repeater.flood_per_minute` | Сколько лавинных пакетов переносится на соседа в минуту |
 | `repeater.duty_ceiling` | Промилле скользящего часа, после которых транзит отходит в сторону. `0` отключает проверку |
 | `repeater.blocked` | Хеши узлов, ради которых пакеты не переносятся, по `"1f"` каждый |
 | `room.admin_password`, `room.guest_password` | Пустой означает, что эта роль войти не может |
@@ -465,7 +465,7 @@ UndefinedBehaviorSanitizer.
 
 - дальше `repeater.max_hops`, потому что пакет, прошедший десяток узлов, ходит по
   кругу;
-- больше `repeater.per_source_per_minute` лавинных пакетов от одного соседа,
+- больше `repeater.flood_per_minute` лавинных пакетов от одного соседа,
   чтобы заклинивший передатчик не мог потратить всё эфирное время узла. Прямые
   пакеты не считаются: они идут по уже выученному кем-то маршруту, приходят по
   одному, и ради этого трафика узел и существует;

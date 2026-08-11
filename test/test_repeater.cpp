@@ -114,7 +114,7 @@ static void testRateLimit()
   section("repeater: one neighbour cannot spend the whole budget");
 
   repeater::Config config;
-  config.perSourcePerMinute = 3;
+  config.floodPerMinute = 3;
   repeater::Policy policy(config);
 
   for (int i = 0; i < 3; i++)

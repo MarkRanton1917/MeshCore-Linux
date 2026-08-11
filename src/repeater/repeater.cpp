@@ -47,7 +47,7 @@ bool Policy::isBlocked(const packet::Packet& p) const
 
 bool Policy::withinRate(size_t bucket, Millis now)
 {
-  if (config_.perSourcePerMinute == 0) return true;
+  if (config_.floodPerMinute == 0) return true;
 
   Bucket& slot = buckets_[bucket];
 
@@ -60,7 +60,7 @@ bool Policy::withinRate(size_t bucket, Millis now)
     slot.count = 0;
   }
 
-  if (slot.count >= config_.perSourcePerMinute) return false;
+  if (slot.count >= config_.floodPerMinute) return false;
 
   slot.count++;
   return true;

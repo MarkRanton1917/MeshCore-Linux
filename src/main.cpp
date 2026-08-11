@@ -508,8 +508,8 @@ int main(int argc, char** argv)
   repeater::Config transitConfig;
   transitConfig.enabled = config.getBool("repeater.enabled", transitConfig.enabled);
   transitConfig.maxHops = (uint8_t)config.getInt("repeater.max_hops", transitConfig.maxHops);
-  transitConfig.perSourcePerMinute =
-    (uint32_t)config.getInt("repeater.per_source_per_minute", transitConfig.perSourcePerMinute);
+  transitConfig.floodPerMinute =
+    (uint32_t)config.getInt("repeater.flood_per_minute", transitConfig.floodPerMinute);
   transitConfig.dutyCeilingPermille =
     (uint32_t)config.getInt("repeater.duty_ceiling", transitConfig.dutyCeilingPermille);
   transitConfig.blocked = blockedFrom(config.getList("repeater.blocked"));

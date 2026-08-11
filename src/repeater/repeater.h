@@ -33,7 +33,7 @@ struct Config {
 
   // Floods per previous hop, per minute. One neighbour with a wedged
   // transmitter must not spend the whole node's airtime.
-  uint32_t perSourcePerMinute = 30;
+  uint32_t floodPerMinute = 30;
 
   // Transit stops once this much of the sliding window has gone, leaving the
   // rest for our own traffic: a room that cannot answer its clients because it
