@@ -319,9 +319,9 @@ static void testAnonymousRead()
 
   const room::Client* client = room.findClient(visitor);
   that("let in with cut-down rights", client && client->access == room::Access::READ_ONLY);
-  that("may read", client && room::Room::can(*client, room::Action::READ));
-  that("may not post", client && !room::Room::can(*client, room::Action::POST));
-  that("may not run commands", client && !room::Room::can(*client, room::Action::COMMAND));
+  that("may read", client && room.can(*client, room::Action::READ));
+  that("may not post", client && !room.can(*client, room::Action::POST));
+  that("may not run commands", client && !room.can(*client, room::Action::COMMAND));
 }
 
 static void testPosting()
@@ -402,7 +402,18 @@ static void testAckPolicy()
   that("a post refused on rights is still acknowledged",
     readerFixture.roomInstance.shouldAck(packet::PayloadType::TXT_MSG, ByteView { post.data(), post.size() }));
 
-  that("the room stays a repeater", room.shouldForward(packet::Packet {}));
+  // A plain room carries nothing, and the type is what says so: a policy handed
+  // to one by mistake does not turn it into a repeater.
+  that("a room with no policy carries nothing", !room.shouldForward(packet::Packet {}));
+
+  repeater::Policy policy;
+  room::Config withPolicy = defaultConfig();
+  withPolicy.forwarder = &policy;
+  Fixture stillARoom(withPolicy);
+  packet::Packet fresh;
+  fresh.header = (uint8_t)(((uint8_t)packet::PayloadType::TXT_MSG << 2) | (uint8_t)packet::RouteType::FLOOD);
+  fresh.hopCount = 1;
+  that("and neither does one that was handed a policy anyway", !stillARoom.roomInstance.shouldForward(fresh));
 }
 
 static void testSyncFlow()
@@ -1244,6 +1255,7 @@ static void testTransitCommands()
   repeater::Policy policy;
 
   room::Config config = defaultConfig();
+  config.type = room::NodeType::ROOM_REPEATER;
   config.admin = &admin;
   config.forwarder = &policy;
 
@@ -1315,6 +1327,84 @@ static void testTransitCommands()
   that("both shadow the config",
     !effective.getBool("repeater.enabled", true) && effective.getInt("repeater.max_hops") == 5);
   unlink((fixture.dir + "/overrides.json").c_str());
+}
+
+// A pure repeater is this same module with the board switched off: an admin
+// still gets in and still drives the node, there is simply nothing to post to.
+static void testRepeaterMode()
+{
+  section("room: a node with no board");
+
+  FakeAdmin admin;
+  repeater::Policy policy;
+
+  crypto::core::SharedSecret secret;
+  for (size_t i = 0; i < PACKET_SHARED_SECRET_SIZE; i++)
+    secret.span()[i] = (uint8_t)(i + 1);
+
+  room::Config config = defaultConfig();
+  config.type = room::NodeType::REPEATER;
+  config.admin = &admin;
+  config.forwarder = &policy;
+  // Configured by mistake: the module must ignore them rather than quietly grow
+  // a board out of the channel that arrives first.
+  room::Channel channel;
+  channel.name = "public";
+  channel.secret = secret;
+  channel.hash = room::channelHashOf(secret);
+  config.channels.push_back(channel);
+
+  Fixture fixture(config);
+  auto& room = fixture.roomInstance;
+  auto& sent = fixture.sender.sent;
+
+  const core::PublicKey guest = keyOf(0x11);
+  auto guestLogin = loginPayload(1000, 0, "guest");
+  room.onAnon(guest, ByteView { guestLogin.data(), guestLogin.size() });
+  that("a guest still logs in", room.findClient(guest) && room.findClient(guest)->access == room::Access::GUEST);
+
+  auto post = textPayload(10000, room::TextType::PLAIN, "hello repeater");
+  room.onPayload(contactOf(guest), packet::PayloadType::TXT_MSG, ByteView { post.data(), post.size() });
+  that("but has nowhere to post", room.postCount() == 0);
+  that("and it is still acknowledged, or the client retries to exhaustion",
+    room.shouldAck(packet::PayloadType::TXT_MSG, ByteView { post.data(), post.size() }));
+  that("nothing goes out to a channel either", fixture.sender.flooded.empty());
+
+  auto plain = textPayload(10000, room::TextType::PLAIN, "from the channel");
+  std::vector<uint8_t> cipher(MAX_PACKET_PAYLOAD);
+  auto sealed =
+    crypto::protocol::seal(secret, ByteView { plain.data(), plain.size() }, ByteSpan { cipher.data(), cipher.size() });
+  packet::GroupMsg group;
+  group.channelHash = channel.hash;
+  group.cipherMac = sealed->mac.view();
+  group.ciphertext = ByteView { cipher.data(), sealed->ciphertextLength };
+  std::vector<uint8_t> payload(MAX_PACKET_PAYLOAD);
+  auto size = packet::encodeGroup(group, ByteSpan { payload.data(), payload.size() });
+  payload.resize(size ? *size : 0);
+  room.onGroup(packet::PayloadType::GRP_TXT, ByteView { payload.data(), payload.size() });
+  that("a channel message lands nowhere", room.postCount() == 0);
+
+  // What the node is actually for.
+  packet::Packet carried;
+  carried.header = (uint8_t)(((uint8_t)packet::PayloadType::TXT_MSG << 2) | (uint8_t)packet::RouteType::FLOOD);
+  carried.hopCount = 1;
+  that("transit is the job and it happens", room.shouldForward(carried));
+
+  const core::PublicKey adminKey = keyOf(0x22);
+  auto adminLogin = loginPayload(1000, 0, "admin-secret");
+  room.onAnon(adminKey, ByteView { adminLogin.data(), adminLogin.size() });
+  sent.clear();
+
+  runCommand(room, adminKey, 2000, "get stats");
+  const std::string stats = replyText(sent.back());
+  that("stats leave the board out entirely", !contains(stats, "posts"));
+  that("and report the transit", contains(stats, "fwd 1") && contains(stats, "clients 2/"));
+
+  runCommand(room, adminKey, 2001, "clear posts");
+  that("clearing a board there is none of says so", contains(replyText(sent.back()), "no board"));
+
+  runCommand(room, adminKey, 2002, "get neighbors");
+  that("the repeater question still answers", contains(replyText(sent.back()), "neighbour"));
 }
 
 static void testNeighbourCommand()
@@ -1392,6 +1482,7 @@ int main()
   testCommands();
   testSettingsReachTheHost();
   testTransitCommands();
+  testRepeaterMode();
   testNeighbourCommand();
 
   return check::report();

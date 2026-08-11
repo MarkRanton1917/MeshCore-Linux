@@ -13,9 +13,29 @@ on decoded objects and one state row per client, which is why the whole module
 tests without a network. Time and radio load are injected — `setServerTime`,
 `setRadioLoad` — rather than read.
 
-`Room` is the [routing](../routing/) `Delegate`. It also stays a repeater: a
-packet addressed to it still travels on, which is a separate branch and never an
-`else`.
+`Room` is the [routing](../routing/) `Delegate`, and it is the delegate on every
+node type, not only the ones with a board. Transit is a separate branch and never
+an `else`: a packet addressed to us is still carried on, if a
+[repeater](../repeater/) policy is attached to say so.
+
+Which of the three node types this is comes in as one field, `Config::type`, and
+everything else follows from it. Two questions, answered by `keepsBoard(type)`
+and `repeats(type)`, and nothing anywhere asks them a third way:
+
+| `NodeType` | `keepsBoard` | `repeats` |
+| --- | --- | --- |
+| `ROOM` | yes | no |
+| `REPEATER` | no | yes |
+| `ROOM_REPEATER` | yes | yes |
+
+A `REPEATER` has nothing to post to: posts are refused, channel messages are
+dropped, `clear posts` says why, and `get stats` leaves the board out of the line
+rather than reporting zeroes. Logins, commands, status replies and transit all
+work exactly as they do on a room.
+
+A `ROOM` carries nothing, whatever else is attached: the type is asked before the
+policy, so a `forwarder` handed to a room by mistake does not turn it into a
+repeater.
 
 Files: [room.h](room.h), [room.cpp](room.cpp). Tests:
 [test/test_room.cpp](../../test/test_room.cpp).
@@ -73,6 +93,10 @@ those commands answer "unsupported" rather than pretending.
 - **`Access`** — `NONE`, `READ_ONLY` (only when anonymous reading is allowed),
   `GUEST`, `ADMIN`.
 - **`Action`** — `READ`, `POST`, `COMMAND`.
+- **`NodeType`** — `ROOM`, `REPEATER`, `ROOM_REPEATER`, with `keepsBoard(type)`
+  and `repeats(type)` beside it. The composition root asks those same two
+  functions when it decides what to advertise and whether to build a transit
+  policy at all.
 
 ### `struct Post`
 
@@ -91,14 +115,15 @@ one cannot block another — and the in-flight push: `pending`, `pendingId`,
 
 ### `struct Config`
 
-`adminPassword`, `guestPassword` (empty means that role cannot log in),
-`allowAnonymousRead`, `clockWindow` (outside it a client's timestamp is replaced
-with ours, or one post from the future breaks sorting and everybody else's
-`syncSince` with it), `retryDelay`, `firmwareVersion`, `maxLoginAttempts` and
-`loginLockout` (guessing a password over the air is slow, but free and unwatched,
-so a key that keeps getting it wrong is made to wait), `channels`, and three
-optional pointers: `bus` ([telemetry](../telemetry/)), `admin`, and `forwarder`
-([repeater](../repeater/) — absent, everything travels on).
+`type` (`ROOM`, `REPEATER` or `ROOM_REPEATER` — see above), `adminPassword`,
+`guestPassword` (empty means that role cannot log in), `allowAnonymousRead`,
+`clockWindow` (outside it a client's timestamp is replaced with ours, or one post
+from the future breaks sorting and everybody else's `syncSince` with it),
+`retryDelay`, `firmwareVersion`, `maxLoginAttempts` and `loginLockout` (guessing
+a password over the air is slow, but free and unwatched, so a key that keeps
+getting it wrong is made to wait), `channels`, and three optional pointers: `bus`
+([telemetry](../telemetry/)), `admin`, and `forwarder` ([repeater](../repeater/)
+— the terms transit is carried on; absent, nothing is).
 
 ### `class Room`
 
@@ -112,8 +137,9 @@ optional pointers: `bus` ([telemetry](../telemetry/)), `admin`, and `forwarder`
   timestamp bookmarks converted on the way in.
 - **The `routing::Delegate` methods** — `onAnon` (a login from a stranger),
   `onPayload`, `onGroup` (channel traffic, tried against every channel whose hash
-  byte matches), `onAck`, `onDeliveryFailed`, `shouldAck` (false for CLI commands),
-  `shouldForward` (defers to the repeater policy; the room stays a repeater).
+  byte matches; ignored outright with no board), `onAck`, `onDeliveryFailed`,
+  `shouldAck` (false for CLI commands), `shouldForward` (the repeater policy's
+  answer, and `false` when there is no policy to ask).
 - **`tick(now)`** — retries, pushes, timers.
 - **`addPost(author, timestamp, text)`** — the board is a ring: post 33 overwrites
   post 1. A post that came in directly is republished to every channel; a post that
@@ -137,8 +163,10 @@ optional pointers: `bus` ([telemetry](../telemetry/)), `admin`, and `forwarder`
   is what somebody wrote, so it is the name that gives way. An author no advert has
   been heard from becomes `?a1b2c3d4`; a post that arrived on a channel has no
   author and gets no prefix.
-- **`can(client, action)`** *(static)* — the access check, in one place and called
-  from three. Scattering the checks is how a new branch ends up without one.
+- **`can(client, action)`** — the access check, in one place and called from
+  three. Scattering the checks is how a new branch ends up without one. `POST` is
+  also where `board` is enforced: whether there is anywhere to write is a property
+  of the node, not of the client asking.
 - **`findClient(pk)`, `clientCount()`, `postCount()`, `posts()`**
 - **`unreadFor(client)`** — how much this client has still to receive. Reported in a
   status reply so a client can tell "nothing new" from "the room never heard me".
@@ -160,9 +188,29 @@ optional pointers: `bus` ([telemetry](../telemetry/)), `admin`, and `forwarder`
 модуль тестируется без сети. Время и загрузка радио передаются внутрь
 (`setServerTime`, `setRadioLoad`), а не читаются.
 
-`Room` — это `Delegate` для [routing](../routing/). При этом он остаётся
-ретранслятором: пакет, адресованный ему, всё равно идёт дальше, и это отдельная
-ветка, а не `else`.
+`Room` — это `Delegate` для [routing](../routing/), причём на узле любого типа, а
+не только там, где есть доска. Транзит — отдельная ветка, а не `else`: пакет,
+адресованный нам, всё равно идёт дальше, если подключена политика
+[repeater](../repeater/), которая это разрешает.
+
+Какой это из трёх типов узла, приходит одним полем `Config::type`, и всё
+остальное следует из него. Два вопроса, на которые отвечают `keepsBoard(type)` и
+`repeats(type)`, и больше нигде они не задаются третьим способом:
+
+| `NodeType` | `keepsBoard` | `repeats` |
+| --- | --- | --- |
+| `ROOM` | да | нет |
+| `REPEATER` | нет | да |
+| `ROOM_REPEATER` | да | да |
+
+У `REPEATER` писать некуда: сообщения отклоняются, сообщения из каналов
+отбрасываются, `clear posts` объясняет почему, а `get stats` просто не включает
+доску в строку, вместо того чтобы показывать нули. Вход, команды, ответы о
+состоянии и транзит работают ровно так же, как в комнате.
+
+`ROOM` не переносит ничего, что бы к нему ни подключили: тип спрашивают раньше
+политики, поэтому `forwarder`, отданный комнате по ошибке, не превращает её в
+ретранслятор.
 
 Файлы: [room.h](room.h), [room.cpp](room.cpp). Тесты:
 [test/test_room.cpp](../../test/test_room.cpp).
@@ -223,6 +271,10 @@ optional pointers: `bus` ([telemetry](../telemetry/)), `admin`, and `forwarder`
 - **`Access`** — `NONE`, `READ_ONLY` (только когда разрешено анонимное чтение),
   `GUEST`, `ADMIN`.
 - **`Action`** — `READ`, `POST`, `COMMAND`.
+- **`NodeType`** — `ROOM`, `REPEATER`, `ROOM_REPEATER`, рядом с ним
+  `keepsBoard(type)` и `repeats(type)`. Композиционный корень спрашивает эти же
+  две функции, когда решает, что объявлять и создавать ли политику транзита
+  вообще.
 
 ### `struct Post`
 
@@ -241,14 +293,16 @@ optional pointers: `bus` ([telemetry](../telemetry/)), `admin`, and `forwarder`
 
 ### `struct Config`
 
-`adminPassword`, `guestPassword` (пустой означает, что эта роль войти не может),
+`type` (`ROOM`, `REPEATER` или `ROOM_REPEATER` — см. выше), `adminPassword`,
+`guestPassword` (пустой означает, что эта роль войти не может),
 `allowAnonymousRead`, `clockWindow` (за его пределами метка клиента заменяется
 нашей, иначе одно сообщение «из будущего» ломает сортировку, а с ней и `syncSince`
 у всех остальных), `retryDelay`, `firmwareVersion`, `maxLoginAttempts` и
 `loginLockout` (подбор пароля по эфиру медленный, но бесплатный и никем не
 наблюдаемый, поэтому ключ, который всё время ошибается, заставляют ждать),
 `channels` и три необязательных указателя: `bus` ([telemetry](../telemetry/)),
-`admin` и `forwarder` ([repeater](../repeater/) — без него идёт дальше всё).
+`admin` и `forwarder` ([repeater](../repeater/) — условия, на которых идёт
+транзит; без него не идёт ничего).
 
 ### `class Room`
 
@@ -262,9 +316,9 @@ optional pointers: `bus` ([telemetry](../telemetry/)), `admin`, and `forwarder`
   а закладки по времени преобразуются на входе.
 - **Методы `routing::Delegate`** — `onAnon` (вход от незнакомца), `onPayload`,
   `onGroup` (трафик канала, проверяемый по каждому каналу с совпадающим байтом
-  хеша), `onAck`, `onDeliveryFailed`, `shouldAck` (false для CLI-команд),
-  `shouldForward` (передаёт решение политике ретрансляции; комната остаётся
-  ретранслятором).
+  хеша; без доски игнорируется целиком), `onAck`, `onDeliveryFailed`, `shouldAck`
+  (false для CLI-команд), `shouldForward` (ответ политики ретрансляции, а без
+  политики — `false`).
 - **`tick(now)`** — повторы, рассылка сообщений, таймеры.
 - **`addPost(author, timestamp, text)`** — доска это кольцо: 33-е сообщение
   затирает первое. Сообщение, пришедшее напрямую, публикуется во все каналы;
@@ -288,9 +342,10 @@ optional pointers: `bus` ([telemetry](../telemetry/)), `admin`, and `forwarder`
   помещались в один кадр: текст это то, что человек написал, поэтому уступает имя.
   Автор, от которого не слышали объявления, становится `?a1b2c3d4`; у сообщения из
   канала автора нет вовсе и префикс не добавляется.
-- **`can(client, action)`** *(статический)* — проверка прав, в одном месте и
-  вызываемая из трёх. Разбросанные проверки — это то, как новая ветка оказывается
-  без проверки.
+- **`can(client, action)`** — проверка прав, в одном месте и вызываемая из трёх.
+  Разбросанные проверки — это то, как новая ветка оказывается без проверки. Здесь
+  же, на `POST`, проверяется `board`: есть ли куда писать — свойство узла, а не
+  того, кто спрашивает.
 - **`findClient(pk)`, `clientCount()`, `postCount()`, `posts()`**
 - **`unreadFor(client)`** — сколько этому клиенту ещё предстоит получить.
   Сообщается в ответе о состоянии, чтобы клиент отличал «нового нет» от «комната

@@ -1,10 +1,5 @@
-clang-format -style=file -i test/* > /dev/null 2>&1
-clang-format -style=file -i src/* > /dev/null 2>&1
-clang-format -style=file -i src/crypto/* > /dev/null 2>&1
-clang-format -style=file -i src/packet/* > /dev/null 2>&1
-clang-format -style=file -i src/identity/* > /dev/null 2>&1
-clang-format -style=file -i src/routing/* > /dev/null 2>&1
-clang-format -style=file -i src/room/* > /dev/null 2>&1
-clang-format -style=file -i src/platform/* > /dev/null 2>&1
-clang-format -style=file -i src/radio/* > /dev/null 2>&1
-clang-format -style=file -i src/telemetry/* > /dev/null 2>&1
+# Sources only. The globs used to be src/* and src/room/* and so on, which hands
+# clang-format every README in the tree as well — and it happily reformats them
+# into rubble. Same file list as check-format.sh, so what is formatted here is
+# exactly what is checked there.
+clang-format -style=file -i $(find src test -regex '.*\.\(c\|cpp\|h\)') > /dev/null 2>&1

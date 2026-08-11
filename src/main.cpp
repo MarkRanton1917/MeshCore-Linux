@@ -20,6 +20,7 @@
 #include <cstdio>
 #include <cstring>
 #include <memory>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -350,17 +351,43 @@ std::vector<room::Channel> channelsFrom(const std::vector<std::string>& entries)
   return channels;
 }
 
-// What the network is told this node is. Only one value fits the four bits an
-// advert has for it, and a node that keeps a board is a room server first —
-// clients look for that, and nothing in an advert says whether a node repeats.
-// A pure repeater keeps no board and says so.
-identity::NodeType nodeTypeFromName(const std::string& name)
+// The config spelling of a node type. Everything else about the three follows
+// from the value itself: room asks it whether there is a board, and the wiring
+// below asks it whether to build a transit policy at all.
+room::NodeType nodeTypeFromName(const std::string& name)
 {
-  if (name == "repeater") return identity::NodeType::REPEATER;
-  if (name == "room") return identity::NodeType::ROOM_SERVER;
+  if (name == "room") return room::NodeType::ROOM;
+  if (name == "repeater") return room::NodeType::REPEATER;
+  if (name == "room-repeater") return room::NodeType::ROOM_REPEATER;
 
-  platform::Log::write(platform::LogLevel::WARN, "unknown node.type '%s', advertising as a room server", name.c_str());
-  return identity::NodeType::ROOM_SERVER;
+  // A typo must not quietly turn a repeater into something that carries
+  // nothing, so the fallback is named in the log rather than left to be
+  // discovered.
+  platform::Log::write(
+    platform::LogLevel::WARN, "unknown node.type '%s', running as a room and carrying nothing", name.c_str());
+  return room::NodeType::ROOM;
+}
+
+const char* nameOf(room::NodeType type)
+{
+  switch (type) {
+  case room::NodeType::REPEATER:
+    return "repeater";
+  case room::NodeType::ROOM_REPEATER:
+    return "room-repeater";
+  case room::NodeType::ROOM:
+    break;
+  }
+  return "room";
+}
+
+// What the network is told this node is. Only one value fits the four bits an
+// advert has for it, so a node that keeps a board is a room server first:
+// clients look for that, and nothing in an advert says whether a node repeats.
+// A node with no board has nothing else to claim, and says repeater.
+identity::NodeType advertisedAs(room::NodeType type)
+{
+  return room::keepsBoard(type) ? identity::NodeType::ROOM_SERVER : identity::NodeType::REPEATER;
 }
 
 // "1f" or "0x1f", one node hash each. A hash and not a key: one byte is what a
@@ -503,38 +530,53 @@ int main(int argc, char** argv)
   routingConfig.seenSlots = (size_t)config.getInt("routing.seen_slots", (long)routingConfig.seenSlots);
   routingConfig.seenTtl = (routing::Millis)config.getInt("routing.seen_ttl_ms", (long)routingConfig.seenTtl);
 
-  // Whether other people's packets travel on, and on what terms. The room asks
-  // it about every packet that lands; nothing else in the tree knows it exists.
-  repeater::Config transitConfig;
-  transitConfig.enabled = config.getBool("repeater.enabled", transitConfig.enabled);
-  transitConfig.maxHops = (uint8_t)config.getInt("repeater.max_hops", transitConfig.maxHops);
-  transitConfig.floodPerMinute =
-    (uint32_t)config.getInt("repeater.flood_per_minute", transitConfig.floodPerMinute);
-  transitConfig.dutyCeilingPermille =
-    (uint32_t)config.getInt("repeater.duty_ceiling", transitConfig.dutyCeilingPermille);
-  transitConfig.blocked = blockedFrom(config.getList("repeater.blocked"));
-  repeater::Policy forwarder(transitConfig);
+  const room::NodeType nodeType = nodeTypeFromName(config.get("node.type", "room"));
 
-  if (!forwarder.enabled()) {
-    // Worth saying out loud: a node that hears everything and passes nothing on
-    // looks exactly like a network with a hole in it.
-    platform::Log::write(platform::LogLevel::WARN, "transit is off, this node carries nothing for anybody");
+  // On what terms other people's packets travel on. Only the types that repeat
+  // get a policy at all, so the `repeater` settings are read for those and
+  // ignored for the rest rather than half-applied to a node that was never
+  // going to use them.
+  std::optional<repeater::Policy> forwarder;
+  if (room::repeats(nodeType)) {
+    repeater::Config transitConfig;
+    transitConfig.enabled = config.getBool("repeater.enabled", transitConfig.enabled);
+    transitConfig.maxHops = (uint8_t)config.getInt("repeater.max_hops", transitConfig.maxHops);
+    transitConfig.floodPerMinute = (uint32_t)config.getInt("repeater.flood_per_minute", transitConfig.floodPerMinute);
+    transitConfig.dutyCeilingPermille =
+      (uint32_t)config.getInt("repeater.duty_ceiling", transitConfig.dutyCeilingPermille);
+    transitConfig.blocked = blockedFrom(config.getList("repeater.blocked"));
+    forwarder.emplace(transitConfig);
+
+    if (!forwarder->enabled()) {
+      // Worth saying out loud: a node that hears everything and passes nothing
+      // on looks exactly like a network with a hole in it.
+      platform::Log::write(platform::LogLevel::WARN, "transit is off, this node carries nothing for anybody");
+    }
   }
 
   // Already the effective value: the overlay was laid over the config above.
   HostAdmin admin(config.get("node.name", "room"), overlay, clock.mono());
-  const identity::NodeType nodeType = nodeTypeFromName(config.get("node.type", "room"));
 
   room::Config roomConfig;
+  roomConfig.type = nodeType;
   roomConfig.adminPassword = config.get("room.admin_password");
   roomConfig.guestPassword = config.get("room.guest_password");
   roomConfig.allowAnonymousRead = config.getBool("room.anonymous_read", false);
   roomConfig.bus = telemetryOn ? &bus : nullptr;
   roomConfig.admin = &admin;
-  roomConfig.forwarder = &forwarder;
-  roomConfig.channels = channelsFrom(config.getList("room.channels"));
-  for (const room::Channel& channel : roomConfig.channels) {
-    platform::Log::write(platform::LogLevel::INFO, "channel '%s', hash %02x", channel.name.c_str(), channel.hash);
+  roomConfig.forwarder = forwarder.has_value() ? &*forwarder : nullptr;
+
+  // A repeater has no board for a channel message to land on, so its channels
+  // are not opened at all. Said out loud, because a config full of channels on
+  // a node that ignores every one of them is not obvious from the outside.
+  if (room::keepsBoard(nodeType)) {
+    roomConfig.channels = channelsFrom(config.getList("room.channels"));
+    for (const room::Channel& channel : roomConfig.channels) {
+      platform::Log::write(platform::LogLevel::INFO, "channel '%s', hash %02x", channel.name.c_str(), channel.hash);
+    }
+  }
+  else if (!config.getList("room.channels").empty() || !config.get("room.guest_password").empty()) {
+    platform::Log::write(platform::LogLevel::WARN, "node.type is repeater: no board, so the room settings do nothing");
   }
 
   room::Room room(store, sender, roomConfig);
@@ -560,8 +602,8 @@ int main(int argc, char** argv)
   platform::Millis nextAdvert = 0;
   platform::Millis nextReport = 0;
 
-  platform::Log::write(platform::LogLevel::INFO, "started as '%s', advertising as a %s", admin.nodeName().c_str(),
-    nodeType == identity::NodeType::REPEATER ? "repeater" : "room server");
+  platform::Log::write(platform::LogLevel::INFO, "started as '%s', a %s, advertising as a %s", admin.nodeName().c_str(),
+    nameOf(nodeType), advertisedAs(nodeType) == identity::NodeType::REPEATER ? "repeater" : "room server");
 
   while (stopping == 0) {
     const platform::Millis now = clock.mono();
@@ -580,7 +622,8 @@ int main(int argc, char** argv)
     // On the timer, or because a command asked for one — after a rename the
     // network holds the old name until the next advert goes out.
     if (now >= nextAdvert || admin.takeAdvertRequest()) {
-      const std::vector<uint8_t> payload = buildAdvertPayload(store, clock.wall(), admin.nodeName(), nodeType);
+      const std::vector<uint8_t> payload =
+        buildAdvertPayload(store, clock.wall(), admin.nodeName(), advertisedAs(nodeType));
       if (!payload.empty()) {
         router.sendFlood(packet::PayloadType::ADVERT, ByteView { payload.data(), payload.size() });
       }

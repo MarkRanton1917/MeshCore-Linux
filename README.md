@@ -93,7 +93,7 @@ Configuration is [meshcore.json](meshcore.json); every key has a default:
 | --- | --- |
 | `node.dir` | Where the identity, contacts and room state live |
 | `node.name` | Name advertised to the network |
-| `node.type` | `room` or `repeater` — what the network is told this node is for. Every node carries other people's packets whichever it says |
+| `node.type` | `room`, `repeater` or `room-repeater` — what this node is. See [node types](#node-types) |
 | `node.flush_ms` | How often state is written (lazily — a write per advert would wear out the card) |
 | `node.advert_ms` | Advert interval |
 | `log.level` | `error`, `warn`, `info`, `debug` |
@@ -106,7 +106,7 @@ Configuration is [meshcore.json](meshcore.json); every key has a default:
 | `routing.forward_airtime_factor`, `routing.forward_jitter` | Transit delay: airtime times the first, plus a random spread up to the second |
 | `routing.max_routes` | Learned direct routes kept at once |
 | `routing.seen_slots`, `routing.seen_ttl_ms` | The duplicate cache: how many packets are remembered, and for how long |
-| `repeater.enabled` | Whether other people's packets travel on at all |
+| `repeater.enabled` | Whether other people's packets travel on at all. Read only by the types that repeat; a `room` ignores the whole `repeater` block |
 | `repeater.max_hops` | Transit stops past this many hops, below the 63 the format allows |
 | `repeater.flood_per_minute` | Floods carried per neighbour per minute |
 | `repeater.duty_ceiling` | Permille of the sliding hour past which transit stands aside. `0` switches the check off |
@@ -115,6 +115,43 @@ Configuration is [meshcore.json](meshcore.json); every key has a default:
 | `room.anonymous_read` | Let strangers read without a password |
 | `room.channels` | `"name:key"` each, the key 64 hex characters. Up to four |
 | `telemetry.enabled`, `telemetry.queue`, `telemetry.report_ms` | Event ring and reporting interval |
+
+<a name="node-types"></a>
+
+### Node types
+
+One binary, three ways to run it. `node.type` is read once at startup into a
+`room::NodeType`, and everything else follows from that one value — whether there
+is a board, whether transit happens, what the advert claims. Two functions beside
+the enum, `keepsBoard(type)` and `repeats(type)`, are the whole of it; nothing
+anywhere keeps a second opinion.
+
+| `node.type` | Noticeboard | Carries other people's packets | Advertised as |
+| --- | --- | --- | --- |
+| `room` | yes | no | room server |
+| `repeater` | no | yes | repeater |
+| `room-repeater` | yes | yes | room server |
+
+- **`room`** — a noticeboard and nothing else. Posts, logins, channels and the
+  admin CLI all work; the `repeater` block is not read at all, and nothing of
+  anybody else's is carried. The whole `repeater` policy is never constructed, so
+  `set repeat`, `get transit` and `clear stats` answer "no transit policy here".
+- **`repeater`** — transit and nothing else. There is no board to post to, so
+  posts are refused and channel messages are dropped; `room.channels` and
+  `room.guest_password` are ignored, and the node says so at startup rather than
+  leaving it to be discovered. An admin still logs in with `room.admin_password`
+  and still drives the node over the air — that is how a repeater on a hilltop is
+  managed at all — and `get stats` reports the transit without a board line.
+- **`room-repeater`** — both, which is what this binary always did before the
+  types existed and what [meshcore.json](meshcore.json) ships with.
+
+Only one value fits the four bits an advert has for a node type, so a node with a
+board advertises as a room server whichever of the two it is: clients look for
+that, and nothing on air says whether a node repeats.
+
+The type is read once at startup. Changing it means editing the config and
+restarting; `set repeat on|off` over the air is the kill switch for a node that
+already repeats, not a way to grow transit on a node that has none.
 
 ### Admin commands
 
@@ -138,7 +175,7 @@ resends the identical frame.
 | `set anonymous.read on\|off` | Reading without a password |
 | `set repeat on\|off` | Whether other people's packets travel on |
 | `set hops.max <n>` | How far a carried packet may have travelled already, 1..63 |
-| `get stats` | Posts, clients, uptime, packets carried and refused, airtime spent |
+| `get stats` | Posts, clients, uptime, packets carried and refused, airtime spent. What the node does not have is left out, not reported as a zero |
 | `get transit` | The same refusals broken out: hop limit, blocked, rate, budget |
 | `get neighbors` | Who this node hears first-hand, with signal and how long ago |
 | `get name`, `get time` | Read one value back |
@@ -154,11 +191,12 @@ post that arrived on a channel has no author at all and gets no prefix.
 
 ### Carrying other people's packets
 
-Every node here is a repeater as well as a board. A packet addressed to this
-node still travels on — the nodes behind it may have missed the original — and
-that is a separate branch in the receive path, never an `else`. What `node.type`
-changes is only what the advert claims: nothing on air says whether a node
-repeats, and clients look for a room server.
+On the two types that repeat — `repeater` and `room-repeater` — a packet
+addressed to this node still travels on as well: the nodes behind it may have
+missed the original. That is a separate branch in the receive path, never an
+`else`. A plain `room` carries nothing, and refusing is the default: a node that
+repeats when nobody asked it to spends somebody else's airtime, and nothing in
+the network complains.
 
 Flood picks up our hash on the way through and stops if it comes back; direct is
 carried only when we are the next hop, and our hash is dropped from what remains.
@@ -256,9 +294,12 @@ network with `SIGTERM`, so state is saved.
 ```sh
 ./network.sh                       # three nodes, full mesh
 ./network.sh -n 5 -t chain         # five nodes in a line, 1-2-3-4-5
-./network.sh -n 5 -t chain -r 2,3,4  # the middle of that chain as repeaters
 ./network.sh -n 4 -t star -v       # hub plus three leaves, debug logging
 ./network.sh -c                    # wipe ./run first, so every node starts a stranger
+
+# -T says what a node is; anything unnamed is a room-repeater.
+./network.sh -n 5 -t chain -T 2=repeater,3=repeater,4=repeater
+./network.sh -n 3 -T default=room,2=room-repeater
 ```
 
 ## Tests
@@ -387,7 +428,7 @@ UndefinedBehaviorSanitizer.
 | --- | --- |
 | `node.dir` | Где живут идентичность, контакты и состояние комнаты |
 | `node.name` | Имя, объявляемое сети |
-| `node.type` | `room` или `repeater` — что сети сообщают о назначении узла. Чужие пакеты переносит любой узел, что бы там ни стояло |
+| `node.type` | `room`, `repeater` или `room-repeater` — чем является этот узел. См. [типы узла](#типы-узла) |
 | `node.flush_ms` | Как часто записывается состояние (лениво — запись на каждое объявление износила бы карту) |
 | `node.advert_ms` | Интервал между объявлениями |
 | `log.level` | `error`, `warn`, `info`, `debug` |
@@ -400,7 +441,7 @@ UndefinedBehaviorSanitizer.
 | `routing.forward_airtime_factor`, `routing.forward_jitter` | Задержка транзита: эфирное время, умноженное на первое, плюс случайный разброс до второго |
 | `routing.max_routes` | Сколько выученных прямых маршрутов держать одновременно |
 | `routing.seen_slots`, `routing.seen_ttl_ms` | Кеш дубликатов: сколько пакетов помнить и как долго |
-| `repeater.enabled` | Идут ли чужие пакеты дальше вообще |
+| `repeater.enabled` | Идут ли чужие пакеты дальше вообще. Читается только теми типами, которые ретранслируют; `room` игнорирует весь блок `repeater` |
 | `repeater.max_hops` | Транзит прекращается после такого числа переходов; меньше, чем 63, которые допускает формат |
 | `repeater.flood_per_minute` | Сколько лавинных пакетов переносится на соседа в минуту |
 | `repeater.duty_ceiling` | Промилле скользящего часа, после которых транзит отходит в сторону. `0` отключает проверку |
@@ -409,6 +450,44 @@ UndefinedBehaviorSanitizer.
 | `room.anonymous_read` | Разрешить незнакомцам читать без пароля |
 | `room.channels` | По `"name:key"` каждый, ключ — 64 шестнадцатеричных символа. До четырёх |
 | `telemetry.enabled`, `telemetry.queue`, `telemetry.report_ms` | Кольцо событий и интервал отчётов |
+
+<a name="типы-узла"></a>
+
+### Типы узла
+
+Один бинарник, три способа его запустить. `node.type` читается один раз при
+старте в `room::NodeType`, и всё остальное следует из этого единственного
+значения — есть ли доска, идёт ли транзит, что заявляет объявление. Две функции
+рядом с перечислением, `keepsBoard(type)` и `repeats(type)`, — это всё; второго
+мнения ни у кого нет.
+
+| `node.type` | Доска | Переносит чужие пакеты | Объявляется как |
+| --- | --- | --- | --- |
+| `room` | да | нет | сервер комнаты |
+| `repeater` | нет | да | ретранслятор |
+| `room-repeater` | да | да | сервер комнаты |
+
+- **`room`** — доска и больше ничего. Сообщения, вход, каналы и админский CLI
+  работают; блок `repeater` не читается вовсе, и ничего чужого не переносится.
+  Политика ретрансляции не создаётся совсем, поэтому `set repeat`, `get transit`
+  и `clear stats` отвечают «no transit policy here».
+- **`repeater`** — только транзит. Писать некуда, поэтому сообщения отклоняются,
+  а сообщения из каналов отбрасываются; `room.channels` и `room.guest_password`
+  игнорируются, и узел говорит об этом при старте, а не оставляет это выяснять.
+  Администратор по-прежнему входит с `room.admin_password` и по-прежнему
+  управляет узлом по эфиру — иначе ретранслятором на холме управлять нечем, — а
+  `get stats` показывает транзит без строки о доске.
+- **`room-repeater`** — и то, и другое: именно так этот бинарник вёл себя всегда,
+  до появления типов, и именно это стоит в [meshcore.json](meshcore.json).
+
+В объявлении на тип узла отведено всего четыре бита и подходит только одно
+значение, поэтому узел с доской объявляется сервером комнаты, каким бы из двух он
+ни был: клиенты ищут именно это, а о том, ретранслирует ли узел, в эфире не
+говорится ничего.
+
+Тип читается один раз при старте. Сменить его — значит поправить конфигурацию и
+перезапустить; `set repeat on|off` по эфиру это выключатель для узла, который уже
+ретранслирует, а не способ добавить транзит туда, где его нет.
 
 ### Админские команды
 
@@ -432,7 +511,7 @@ UndefinedBehaviorSanitizer.
 | `set anonymous.read on\|off` | Чтение без пароля |
 | `set repeat on\|off` | Идут ли чужие пакеты дальше |
 | `set hops.max <n>` | Сколько переходов уже мог пройти переносимый пакет, 1..63 |
-| `get stats` | Сообщения, клиенты, время работы, перенесённые и отклонённые пакеты, потраченное эфирное время |
+| `get stats` | Сообщения, клиенты, время работы, перенесённые и отклонённые пакеты, потраченное эфирное время. Чего у узла нет, то не выводится, а не показывается нулём |
 | `get transit` | Те же отказы по отдельности: лимит переходов, блокировка, частота, бюджет |
 | `get neighbors` | Кого этот узел слышит напрямую, с уровнем сигнала и давностью |
 | `get name`, `get time` | Прочитать одно значение |
@@ -449,11 +528,12 @@ UndefinedBehaviorSanitizer.
 
 ### Перенос чужих пакетов
 
-Каждый узел здесь одновременно и доска, и ретранслятор. Пакет, адресованный этому
-узлу, всё равно идёт дальше — узлы за ним могли не услышать оригинал, — и это
-отдельная ветка на пути приёма, а не `else`. `node.type` меняет только то, что
-заявляет объявление: в эфире нет ничего, что говорило бы, ретранслирует ли узел,
-а клиенты ищут сервер комнаты.
+На двух типах, которые ретранслируют, — `repeater` и `room-repeater` — пакет,
+адресованный этому узлу, всё равно идёт дальше: узлы за ним могли не услышать
+оригинал. Это отдельная ветка на пути приёма, а не `else`. Простой `room` не
+переносит ничего, и отказ здесь — поведение по умолчанию: узел, который
+ретранслирует, когда его об этом не просили, тратит чужое эфирное время, и никто
+в сети на это не пожалуется.
 
 Лавинный пакет по дороге забирает наш хеш и останавливается, если возвращается
 обратно; прямой переносится, только когда следующий переход — мы, и наш хеш из
@@ -554,9 +634,12 @@ overlay фатален, а не игнорируется: подняться с 
 ```sh
 ./network.sh                       # три узла, полносвязная сеть
 ./network.sh -n 5 -t chain         # пять узлов в линию, 1-2-3-4-5
-./network.sh -n 5 -t chain -r 2,3,4  # середина этой цепочки как ретрансляторы
 ./network.sh -n 4 -t star -v       # центр и три луча, отладочное логирование
 ./network.sh -c                    # сначала стереть ./run, чтобы каждый узел стартовал незнакомцем
+
+# -T задаёт, чем является узел; всё неназванное — room-repeater.
+./network.sh -n 5 -t chain -T 2=repeater,3=repeater,4=repeater
+./network.sh -n 3 -T default=room,2=room-repeater
 ```
 
 ## Тесты

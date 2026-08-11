@@ -82,13 +82,16 @@ void Room::tick(Millis now)
 
 // ------------------------------------------------------------------ rights
 
-bool Room::can(const Client& client, Action action)
+bool Room::can(const Client& client, Action action) const
 {
   switch (action) {
   case Action::READ:
+    // Left alone on a boardless node: reading is what a status reply answers,
+    // and "no posts, and here is the node" is a truthful answer.
     return client.access != Access::NONE;
   case Action::POST:
-    return client.access == Access::GUEST || client.access == Access::ADMIN;
+    // Nowhere to put it on a repeater, whoever is asking.
+    return keepsBoard(config_.type) && (client.access == Access::GUEST || client.access == Access::ADMIN);
   case Action::COMMAND:
     return client.access == Access::ADMIN;
   }
@@ -442,12 +445,14 @@ bool Room::shouldAck(packet::PayloadType type, ByteView plain)
   return (TextType)message->txtType != TextType::CLI;
 }
 
-// The room stays a repeater, and the policy is the only thing that can talk it
-// out of carrying a particular packet. Without one attached everything travels
-// on, which is what a room server did before the policy existed.
+// Two answers, in order: whether this node repeats at all, which is what its
+// type says, and then the policy's, which is the only thing that can talk it out
+// of a particular packet. Both refuse by default — a node that repeats when
+// nobody asked it to spends somebody else's airtime, and nothing in the network
+// complains.
 bool Room::shouldForward(const packet::Packet& p)
 {
-  if (config_.forwarder == nullptr) return true;
+  if (!repeats(config_.type) || config_.forwarder == nullptr) return false;
 
   const bool carry = config_.forwarder->shouldForward(p, now_, radioLoad_);
   if (!carry && config_.bus != nullptr) {
@@ -468,6 +473,9 @@ uint8_t room::channelHashOf(const core::SharedSecret& secret)
 // carry a command, or move a client's bookmark.
 void Room::onGroup(packet::PayloadType type, ByteView payload)
 {
+  // A channel message becomes a post, so a repeater has nothing to do with one.
+  // It still travels on: transit is decided before this is reached.
+  if (!keepsBoard(config_.type)) return;
   if (type != packet::PayloadType::GRP_TXT) return;
 
   auto group = packet::decodeGroup(payload);
@@ -901,18 +909,25 @@ void Room::commandGet(const PublicKey& to, std::string_view rest)
     const uint32_t uptime = config_.admin != nullptr ? config_.admin->uptime() : 0;
 
     // The board and the transit in one line, because they are one node and the
-    // question behind the command is always "is it well".
+    // question behind the command is always "is it well". What this node does
+    // not have is left out rather than reported as a zero: a repeater answering
+    // "posts 0/32" reads as a room that lost its board.
+    char board[32] = "";
+    if (keepsBoard(config_.type)) {
+      std::snprintf(board, sizeof board, "posts %zu/%u, ", posts_.size(), (unsigned)MAX_POSTS);
+    }
+
     if (config_.forwarder != nullptr) {
       const repeater::Stats& transit = config_.forwarder->stats();
       const uint32_t refused = transit.hopLimit + transit.blocked + transit.rateLimited + transit.budget;
-      replyf(to, "posts %zu/%u, clients %zu/%u, up %uh%02um, fwd %u, refused %u, duty %u.%u%%", posts_.size(),
-        (unsigned)MAX_POSTS, clients_.size(), (unsigned)MAX_ROOM_CLIENTS, uptime / 3600, (uptime / 60) % 60,
-        (unsigned)transit.forwarded, (unsigned)refused, radioLoad_ / 10, radioLoad_ % 10);
+      replyf(to, "%sclients %zu/%u, up %uh%02um, fwd %u, refused %u, duty %u.%u%%", board, clients_.size(),
+        (unsigned)MAX_ROOM_CLIENTS, uptime / 3600, (uptime / 60) % 60, (unsigned)transit.forwarded, (unsigned)refused,
+        radioLoad_ / 10, radioLoad_ % 10);
       return;
     }
 
-    replyf(to, "posts %zu/%u, clients %zu/%u, up %uh%02um", posts_.size(), (unsigned)MAX_POSTS, clients_.size(),
-      (unsigned)MAX_ROOM_CLIENTS, uptime / 3600, (uptime / 60) % 60);
+    replyf(to, "%sclients %zu/%u, up %uh%02um", board, clients_.size(), (unsigned)MAX_ROOM_CLIENTS, uptime / 3600,
+      (uptime / 60) % 60);
     return;
   }
   if (key == "transit") {
@@ -949,6 +964,13 @@ void Room::commandClear(const PublicKey& to, std::string_view rest)
   const std::string_view key = takeWord(rest);
 
   if (key == "posts") {
+    // "OK - 0 posts cleared" on a repeater answers a question the node cannot
+    // have been asked; say why instead.
+    if (!keepsBoard(config_.type)) {
+      sendCliReply(to, "ERR - no board on this node");
+      return;
+    }
+
     const size_t removed = posts_.size();
     posts_.clear();
     // The clients keep their bookmarks. Rewinding them would replay whatever

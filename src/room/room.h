@@ -110,6 +110,25 @@ enum class Action {
   COMMAND
 };
 
+// What this node is. Everything that differs between the three follows from
+// these two questions and nothing else asks them again: does it keep a
+// noticeboard, and does it carry other people's packets.
+enum class NodeType : uint8_t {
+  ROOM, // a board, and nothing carried for anybody
+  REPEATER, // transit only: no board to post to, but still an admin's to drive
+  ROOM_REPEATER // both
+};
+
+constexpr bool keepsBoard(NodeType type)
+{
+  return type != NodeType::REPEATER;
+}
+
+constexpr bool repeats(NodeType type)
+{
+  return type != NodeType::ROOM;
+}
+
 struct Post {
   // Ours, monotonic, and the only thing synchronisation is allowed to count on.
   // Timestamps come from client clocks: two posts can share one to the second,
@@ -136,6 +155,12 @@ struct Client {
 };
 
 struct Config {
+  // What this node is, and the only place it is decided. A `REPEATER` refuses
+  // posts and drops channel traffic — there is nowhere to put it — while logins,
+  // commands and transit work exactly as they do on a room. A `ROOM` carries
+  // nothing for anybody.
+  NodeType type = NodeType::ROOM;
+
   std::string adminPassword;
   std::string guestPassword;
   bool allowAnonymousRead = false;
@@ -164,8 +189,9 @@ struct Config {
   // Optional too. Absent, the commands that reach outside the room refuse.
   Admin* admin = nullptr;
 
-  // Whether somebody else's packet travels on. Absent, everything does, which
-  // is what this node did before there was a policy to ask.
+  // On what terms somebody else's packet travels on. Only the types that repeat
+  // are given one, and without it nothing is carried: the terms are missing, not
+  // relaxed.
   repeater::Policy* forwarder = nullptr;
 };
 
@@ -193,7 +219,8 @@ public:
   void onDeliveryFailed(SendId id) override;
   bool shouldAck(packet::PayloadType type, ByteView plain) override;
 
-  // The room stays a repeater. A packet addressed to it still travels on.
+  // Whether somebody else's packet travels on, which is the transit policy's
+  // answer and nobody else's. A packet addressed to us is still carried too.
   bool shouldForward(const packet::Packet& p) override;
 
   void tick(Millis now);
@@ -215,8 +242,14 @@ public:
   void pushNextPost(Client& client);
 
   // One place, called from three. Scattering the checks is how a new branch
-  // ends up without one.
-  static bool can(const Client& client, Action action);
+  // ends up without one. Not static any more: whether there is a board to write
+  // to is a property of the node, not of the client asking.
+  bool can(const Client& client, Action action) const;
+
+  NodeType type() const
+  {
+    return config_.type;
+  }
 
   Client* findClient(const PublicKey& pk);
   size_t clientCount() const

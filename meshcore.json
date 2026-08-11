@@ -2,7 +2,7 @@
   "node": {
     "dir": "./data",
     "name": "room",
-    "type": "room",
+    "type": "room-repeater",
     "flush_ms": 60000,
     "advert_ms": 300000
   },

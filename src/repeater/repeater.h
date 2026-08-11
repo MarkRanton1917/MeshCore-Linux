@@ -17,8 +17,8 @@
 // is yes or no. That is why the whole module tests in a loop with no network.
 //
 // Forwarding itself belongs to routing; this only says whether it may happen.
-// With no policy attached a node forwards everything, which is what the room
-// server did before this module existed.
+// A policy exists only on the node types that repeat, and a node with none
+// attached carries nothing at all — which is what a plain room server is.
 namespace repeater {
 
 using Millis = uint64_t;

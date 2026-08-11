@@ -10,7 +10,11 @@
 #   ./network.sh                     three nodes, full mesh
 #   ./network.sh -n 5 -t chain       five nodes in a line, 1-2-3-4-5
 #   ./network.sh -n 4 -t star -v     hub plus three leaves, debug logging
-#   ./network.sh -n 5 -t chain -r 2,3,4   the middle of the chain as repeaters
+#   ./network.sh -n 5 -t chain -T 2=repeater,3=repeater,4=repeater
+#                                    a board at each end, transit in between
+#   ./network.sh -n 3 -T default=room,2=room-repeater
+#                                    two boards that can only reach each other
+#                                    through the one node that carries
 
 set -euo pipefail
 
@@ -21,13 +25,14 @@ workdir=./run
 advert_ms=10000
 level=info
 clean=0
-repeaters=
+types=
+default_type=room-repeater
 
 usage()
 {
   cat <<'TEXT'
 usage: network.sh [-n count] [-t mesh|chain|star] [-p base-port] [-d dir]
-                  [-a advert-ms] [-r list] [-v] [-c]
+                  [-a advert-ms] [-T node=type,...] [-v] [-c]
 
   -n  number of nodes (default 3)
   -t  topology (default mesh)
@@ -38,22 +43,24 @@ usage: network.sh [-n count] [-t mesh|chain|star] [-p base-port] [-d dir]
   -d  working directory for configs, data and logs (default ./run)
   -a  advert interval in milliseconds (default 10000, the node default is
       300000 which is too slow to watch)
-  -r  comma-separated nodes that advertise themselves as repeaters, e.g. 2,3.
-      Every node carries other people's packets whatever this says; what it
-      changes is what the network is told the node is for
+  -T  what a node is, as node=type pairs: -T 2=repeater,5=room. May be given
+      more than once, and default=type changes what an unnamed node is.
+        room           a board of its own, carries nothing for anybody
+        repeater       transit only, with no board to post to
+        room-repeater  both, and what an unnamed node is
   -v  log at debug instead of info
   -c  wipe the working directory first, so every node starts as a stranger
 TEXT
 }
 
-while getopts "n:t:p:d:a:r:vch" option; do
+while getopts "n:t:p:d:a:T:vch" option; do
   case "$option" in
   n) count=$OPTARG ;;
   t) topology=$OPTARG ;;
   p) base_port=$OPTARG ;;
   d) workdir=$OPTARG ;;
   a) advert_ms=$OPTARG ;;
-  r) repeaters=$OPTARG ;;
+  T) types="${types:+$types,}$OPTARG" ;;
   v) level=debug ;;
   c) clean=1 ;;
   h)
@@ -78,6 +85,45 @@ esac
 if ! [[ $count =~ ^[0-9]+$ ]] || [ "$count" -lt 2 ]; then
   echo "need at least two nodes" >&2
   exit 2
+fi
+
+valid_type()
+{
+  case "$1" in
+  room | repeater | room-repeater) return 0 ;;
+  esac
+  return 1
+}
+
+# The whole -T list is settled before a single node starts. A typo found in the
+# log of a network that is already running is found too late: by then five
+# processes are up and the one that matters is silently the wrong thing.
+node_types=()
+if [ -n "$types" ]; then
+  IFS=, read -ra assignments <<<"$types"
+  for assignment in "${assignments[@]}"; do
+    node=${assignment%%=*}
+    type=${assignment#*=}
+
+    if [ "$node" = "$assignment" ] || [ -z "$node" ] || [ -z "$type" ]; then
+      echo "'$assignment' is not node=type" >&2
+      exit 2
+    fi
+    if ! valid_type "$type"; then
+      echo "unknown node type '$type', expected room, repeater or room-repeater" >&2
+      exit 2
+    fi
+
+    if [ "$node" = default ]; then
+      default_type=$type
+      continue
+    fi
+    if ! [[ $node =~ ^[0-9]+$ ]] || [ "$node" -lt 1 ] || [ "$node" -gt "$count" ]; then
+      echo "'$assignment' names no node in a network of $count" >&2
+      exit 2
+    fi
+    node_types[$node]=$type
+  done
 fi
 
 binary=${MESHCORE_NODE:-build/meshcore-node}
@@ -135,21 +181,12 @@ peers_of()
   echo "$list"
 }
 
-# What node $1 tells the network it is. Only the advert changes: this binary is
-# a room server that also repeats, whichever answer comes back here.
+# What node $1 is: whatever -T said, and otherwise a room-repeater. Carrying is
+# the default because a demo network whose middle nodes drop everything is a
+# demo of nothing — a `room` is a deliberate choice, made one node at a time.
 type_of()
 {
-  local self=$1
-  local entry
-  local IFS=,
-
-  for entry in $repeaters; do
-    if [ "$entry" = "$self" ]; then
-      echo repeater
-      return
-    fi
-  done
-  echo room
+  echo "${node_types[$1]:-$default_type}"
 }
 
 pids=()

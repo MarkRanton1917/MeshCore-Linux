@@ -10,8 +10,9 @@ budget is gone are all handed in, and what comes back is yes or no. That is why
 the whole module tests in a loop with no network.
 
 Forwarding itself belongs to [routing](../routing/); this only says whether it may
-happen. With no policy attached a node forwards everything, which is what the room
-server did before this module existed.
+happen. A policy exists only on the node types that repeat — `repeater` and
+`room-repeater` — and a node with none attached carries nothing at all, which is
+what a plain `room` is.
 
 Files: [repeater.h](repeater.h), [repeater.cpp](repeater.cpp). Tests:
 [test/test_repeater.cpp](../../test/test_repeater.cpp).
@@ -74,8 +75,9 @@ needs evicting.
 Именно поэтому весь модуль тестируется в цикле без всякой сети.
 
 Сама пересылка — дело [routing](../routing/); здесь только говорится, можно ли её
-делать. Без подключённой политики узел пересылает всё — так вёл себя сервер
-комнаты до появления этого модуля.
+делать. Политика есть только у тех типов узла, которые ретранслируют, —
+`repeater` и `room-repeater`; узел без подключённой политики не переносит ничего,
+и это ровно то, чем является обычный `room`.
 
 Файлы: [repeater.h](repeater.h), [repeater.cpp](repeater.cpp). Тесты:
 [test/test_repeater.cpp](../../test/test_repeater.cpp).
