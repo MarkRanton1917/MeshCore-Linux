@@ -229,7 +229,6 @@ for ((node = 1; node <= count; node++)); do
     "level": "$level"
   },
   "radio": {
-    "driver": "udp",
     "udp_bind": "127.0.0.1",
     "udp_port": $(port_of "$node"),
     "udp_peers": [$(peers_of "$node")]

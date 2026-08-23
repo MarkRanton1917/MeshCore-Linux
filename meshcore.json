@@ -12,13 +12,27 @@
   },
 
   "radio": {
-    "driver": "udp",
-
     "udp_bind": "127.0.0.1",
     "udp_port": 0,
     "udp_peers": [],
     "udp_group": "",
     "udp_group_port": 4242,
+
+    "spi_bus": 0,
+    "spi_cs": 0,
+    "spi_speed": 2000000,
+    "gpio_chip": 0,
+    "pin_nss": -1,
+    "pin_busy": 20,
+    "pin_reset": 18,
+    "pin_dio1": 16,
+    "pin_rx_enable": 6,
+    "pin_tx_enable": -1,
+    "dio2_rf_switch": true,
+    "tcxo_millivolts": 0,
+    "regulator_ldo": false,
+    "tx_power": 22,
+    "current_limit_ma": 140,
 
     "frequency": 869525000,
     "spreading_factor": 11,

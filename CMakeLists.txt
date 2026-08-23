@@ -71,6 +71,36 @@ target_include_directories(meshcore PUBLIC src src/packet src/crypto src/identit
 target_link_libraries(meshcore PUBLIC PkgConfig::SODIUM PRIVATE nlohmann_json::nlohmann_json)
 target_compile_options(meshcore PRIVATE -Wall -Wextra)
 
+# Which radio the node is, decided once and here. A build for the SX1262 and a
+# build for the UDP bench are not the same program, so the choice is a compile
+# parameter rather than a config key that would let a node claim hardware it was
+# never built with.
+set(RADIO "UDP" CACHE STRING "Radio to build the driver for: UDP or SX1262")
+set_property(CACHE RADIO PROPERTY STRINGS UDP SX1262)
+
+if(RADIO STREQUAL "SX1262")
+  find_path(LGPIO_INCLUDE_DIR lgpio.h)
+  find_library(LGPIO_LIBRARY NAMES lgpio)
+
+  if(NOT LGPIO_INCLUDE_DIR OR NOT LGPIO_LIBRARY)
+    message(FATAL_ERROR
+      "RADIO=SX1262 needs lgpio, which was not found. On a Raspberry Pi: apt install liblgpio-dev. "
+      "Elsewhere, build with -DRADIO=UDP.")
+  endif()
+
+  message(STATUS "RADIO=SX1262: the chip over SPI")
+  target_sources(meshcore PRIVATE src/radio/sx1262_radio.cpp)
+  target_include_directories(meshcore PRIVATE ${LGPIO_INCLUDE_DIR})
+  target_link_libraries(meshcore PRIVATE RadioLib ${LGPIO_LIBRARY})
+
+  target_compile_definitions(meshcore PUBLIC SX1262_RADIO=1)
+elseif(RADIO STREQUAL "UDP")
+  message(STATUS "RADIO=UDP: frames over the network, for the test bench")
+  target_compile_definitions(meshcore PUBLIC UDP_RADIO=1)
+else()
+  message(FATAL_ERROR "RADIO is '${RADIO}'; it takes UDP or SX1262")
+endif()
+
 if(SANITIZE)
   target_compile_options(meshcore PUBLIC -fsanitize=address,undefined -g)
   target_link_options(meshcore PUBLIC -fsanitize=address,undefined)
@@ -88,6 +118,5 @@ foreach(suite test_packet test_crypto test_identity test_routing test_repeater t
   target_link_libraries(${suite} PRIVATE meshcore)
   target_compile_options(${suite} PRIVATE -Wall -Wextra)
 
-  # test_crypto writes key files, so give both suites a scratch directory.
   add_test(NAME ${suite} COMMAND ${suite} WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR})
 endforeach()

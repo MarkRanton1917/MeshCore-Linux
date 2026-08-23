@@ -259,6 +259,113 @@ private:
   std::vector<Endpoint> destinations_;
 };
 
+// The chip itself, over SPI. Compiled only where lgpio is — a Raspberry Pi and
+// its kin — so the declaration sits behind the macro the build sets: a node
+// built on a laptop has the other three drivers and not this one.
+#ifdef SX1262_RADIO
+
+// Pin numbers are BCM, the numbering lgpio and every HAT datasheet use. The
+// defaults are the Waveshare SX1262 XXXM LoRaWAN/GNSS HAT, taken from its own
+// driver rather than guessed. Nothing here can be probed, so a different board
+// means reading its schematic and setting every one of them.
+struct Sx1262Options {
+  uint8_t spiBus = 0; // SPI0 is /dev/spidev0.*
+  uint8_t spiChipSelect = 0; // the CE line within it: /dev/spidev0.0
+  uint32_t spiSpeedHz = 2000000; // the chip takes 18 MHz; the ribbon is the limit
+  uint8_t gpioChip = 0; // gpiochip0 through the Pi 4; the Pi 5 moved it to 4
+
+  // -1 for NSS does not mean "absent": this HAT wires the chip to CE0, so the
+  // SPI controller drives chip select and the driver must keep its hands off
+  // it. A board that puts NSS on a spare pin names that pin here instead.
+  int32_t pinNss = -1;
+  int32_t pinBusy = 20;
+  int32_t pinReset = 18;
+  int32_t pinDio1 = 16;
+
+  // The RF switch, and the one place where the silkscreen lies. On this HAT the
+  // pin labelled TXEN is high while *receiving*: its own driver pulls BCM 6 low
+  // to transmit and high to listen. So it belongs in the receive slot, and the
+  // transmit side is DIO2's job below. Backwards, the node hears nothing and
+  // the PA talks into a switch pointed the wrong way.
+  int32_t pinRxEnable = 6;
+  int32_t pinTxEnable = -1;
+
+  // The other half of that switch: RXEN is soldered straight to DIO2, which the
+  // chip raises for exactly the length of a transmission.
+  bool dio2AsRfSwitch = true;
+
+  // The setting that fails silently and completely. A board with a TCXO needs
+  // its voltage here; this one has a plain 32 MHz crystal and needs 0, and the
+  // wrong answer means the chip never leaves reset.
+  float tcxoVoltage = 0.0f;
+  bool useRegulatorLdo = false;
+
+  int8_t txPowerDbm = 22; // the SX1262's ceiling, and what the HAT is rated for
+  float currentLimitMa = 140.0f; // what 22 dBm draws; RadioLib would leave it at 60
+};
+
+// Half duplex for real, not as an approximation: while a frame is going out the
+// receiver is deaf, so the queue in front of it is the only thing keeping the
+// node's own replies ahead of other people's packets.
+//
+// Driven entirely from tick(): the IRQ line is read over SPI rather than
+// through a GPIO interrupt, because the node's loop already comes round every
+// few milliseconds and a callback would arrive on lgpio's thread, inside a
+// driver that owns no lock.
+class Sx1262Radio : public IRadio {
+public:
+  Sx1262Radio(Sx1262Options options, Params params = {});
+  ~Sx1262Radio() override;
+
+  // Resets the chip, configures it, and leaves it listening. False leaves the
+  // reason in the log; a radio that will not start has no useful degraded mode.
+  bool open();
+
+  bool send(ByteView frame, Priority priority = Priority::NORMAL) override;
+  void tick(Millis now) override;
+  void setSink(RxSink* sink) override
+  {
+    sink_ = sink;
+  }
+  uint32_t airtimeUs(size_t length) const override;
+  bool canTransmitNow() const override;
+
+  size_t queueDepth() const
+  {
+    return queue_.size();
+  }
+  uint32_t usedPermille() const
+  {
+    return duty_.usedPermille(now_);
+  }
+
+private:
+  bool startListening();
+  void collect();
+  void startTransmit(Millis now);
+  void finishTransmit();
+
+  Sx1262Options options_;
+  Params params_;
+  DutyCycle duty_;
+  TxQueue queue_;
+  RxSink* sink_ = nullptr;
+  Millis now_ = 0;
+
+  // Opaque so that no RadioLib header reaches this one. Everything above the
+  // module includes radio.h, and behind RadioLib come a HAL and lgpio.
+  struct Device;
+  std::unique_ptr<Device> device_;
+
+  // A transmission is in flight from the moment the frame is handed to the
+  // chip until TX_DONE comes back. The deadline is the escape hatch: a chip
+  // that stops answering must not take the node off the air for good.
+  bool transmitting_ = false;
+  Millis transmitDeadline_ = 0;
+};
+
+#endif // SX1262_RADIO
+
 // Replays a captured dump with its original timing. What you reach for when a
 // bug happened on the real network and has to happen again.
 class ReplayRadio : public IRadio {

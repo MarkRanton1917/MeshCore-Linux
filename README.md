@@ -69,6 +69,16 @@ cmake --build build -j
 This produces `build/meshcore-node` and the `meshcore` library the tests link
 against. `-DSANITIZE=ON` adds AddressSanitizer and UndefinedBehaviorSanitizer.
 
+`-DRADIO=` says which radio the node is: `UDP`, the default, which carries
+frames over the network for the test bench, or `SX1262`, the real chip, which
+needs lgpio (`liblgpio-dev`). There is no config key for this — a build for the
+SX1262 and a build for the bench are not the same program, and settling it at
+compile time means a node cannot ask for hardware it was never built with.
+
+```sh
+cmake -S . -B build -DRADIO=SX1262     # on the Raspberry Pi
+```
+
 ## Run
 
 ```sh
@@ -97,12 +107,17 @@ Configuration is [meshcore.json](meshcore.json); every key has a default:
 | `node.flush_ms` | How often state is written (lazily — a write per advert would wear out the card) |
 | `node.advert_ms` | Advert interval |
 | `log.level` | `error`, `warn`, `info`, `debug` |
-| `radio.driver` | `udp` or `virtual` |
 | `radio.udp_bind`, `radio.udp_port` | Local socket; port `0` lets the kernel choose |
 | `radio.udp_peers` | `"host:port"` each — who hears this node |
 | `radio.udp_group`, `radio.udp_group_port` | Optional multicast, so a LAN needs no peer list |
 | `radio.frequency`, `radio.spreading_factor`, `radio.bandwidth`, `radio.coding_rate` | LoRa parameters; these must match the network bit for bit |
 | `radio.duty_cycle` | Percent per sliding hour (10 on 868 MHz in Europe) |
+| `radio.spi_bus`, `radio.spi_cs`, `radio.spi_speed` | `sx1262`: SPI0 chip-select 0 is `/dev/spidev0.0` |
+| `radio.gpio_chip` | `sx1262`: `0` through the Pi 4, `4` on the Pi 5 |
+| `radio.pin_nss`, `radio.pin_busy`, `radio.pin_reset`, `radio.pin_dio1` | `sx1262`: BCM numbers; `pin_nss` of `-1` leaves chip select to the SPI controller |
+| `radio.pin_rx_enable`, `radio.pin_tx_enable`, `radio.dio2_rf_switch` | `sx1262`: the RF switch, whichever half of it the board wires where |
+| `radio.tcxo_millivolts` | `sx1262`: `0` for a board with a plain crystal. Wrong here and the chip never starts |
+| `radio.tx_power`, `radio.current_limit_ma` | `sx1262`: dBm at the PA, and how much it may draw getting there |
 | `routing.forward_airtime_factor`, `routing.forward_jitter` | Transit delay: airtime times the first, plus a random spread up to the second |
 | `routing.max_routes` | Learned direct routes kept at once |
 | `routing.seen_slots`, `routing.seen_ttl_ms` | The duplicate cache: how many packets are remembered, and for how long |
@@ -279,11 +294,24 @@ believes are in force, a password among them, is worse than not coming up.
 
 ### Radio drivers
 
-`udp` carries frames over UDP between processes on one machine or hosts on a
-LAN, keeping the real airtime and duty-cycle accounting. Each node's peer list
-is the visibility matrix, so a chain A–B–C is three configs rather than a special
-mode. `virtual` is the in-process shared medium the tests use. There is no
-SX1262 driver yet; RadioLib is vendored for it.
+Which one a node has is `-DRADIO=` at build time, not a key in its config.
+
+**`SX1262`** is the real one: the chip over SPI, through RadioLib and lgpio. The
+defaults are the pinout of the Waveshare SX1262 XXXM LoRaWAN/GNSS HAT, taken
+from that board's own driver; every other board means reading its schematic. Two
+settings fail silently and completely if they are wrong — `radio.tcxo_millivolts`,
+which must be `0` on a board with a plain crystal, and the RF-switch pins, whose
+labels do not always mean what they say. See [src/radio/](src/radio/).
+
+**`UDP`** carries frames over UDP between processes on one machine or hosts on a
+LAN, keeping the real airtime and duty-cycle accounting. Each node's peer list is
+the visibility matrix, so a chain A–B–C is three configs rather than a special
+mode. A node with no peers and no group hears nobody, which is how you run one on
+its own.
+
+The in-process shared medium and the dump replayer are test fixtures rather than
+drivers: they are built from code, not chosen from a config. See
+[src/radio/](src/radio/).
 
 ### A network on one machine
 
@@ -403,6 +431,16 @@ cmake --build build -j
 линкуются тесты. `-DSANITIZE=ON` добавляет AddressSanitizer и
 UndefinedBehaviorSanitizer.
 
+`-DRADIO=` говорит, какое у узла радио: `UDP` по умолчанию — кадры по сети, для
+стенда, — или `SX1262`, настоящий чип, которому нужен lgpio (`liblgpio-dev`).
+Ключа в конфиге для этого нет: сборка под SX1262 и сборка под стенд — разные
+программы, а решение на этапе компиляции означает, что узел не может попросить
+железо, с которым его не собирали.
+
+```sh
+cmake -S . -B build -DRADIO=SX1262     # на Raspberry Pi
+```
+
 ## Запуск
 
 ```sh
@@ -432,12 +470,17 @@ UndefinedBehaviorSanitizer.
 | `node.flush_ms` | Как часто записывается состояние (лениво — запись на каждое объявление износила бы карту) |
 | `node.advert_ms` | Интервал между объявлениями |
 | `log.level` | `error`, `warn`, `info`, `debug` |
-| `radio.driver` | `udp` или `virtual` |
 | `radio.udp_bind`, `radio.udp_port` | Локальный сокет; порт `0` выбирает ядро |
 | `radio.udp_peers` | По `"host:port"` каждый — кто слышит этот узел |
 | `radio.udp_group`, `radio.udp_group_port` | Необязательный multicast, чтобы локальной сети не нужен был список соседей |
 | `radio.frequency`, `radio.spreading_factor`, `radio.bandwidth`, `radio.coding_rate` | Параметры LoRa; должны совпадать с сетью бит в бит |
 | `radio.duty_cycle` | Проценты за скользящий час (10 на 868 МГц в Европе) |
+| `radio.spi_bus`, `radio.spi_cs`, `radio.spi_speed` | `sx1262`: SPI0 с выборкой 0 — это `/dev/spidev0.0` |
+| `radio.gpio_chip` | `sx1262`: `0` по Pi 4 включительно, `4` на Pi 5 |
+| `radio.pin_nss`, `radio.pin_busy`, `radio.pin_reset`, `radio.pin_dio1` | `sx1262`: номера BCM; `pin_nss` со значением `-1` оставляет выборку кристалла контроллеру SPI |
+| `radio.pin_rx_enable`, `radio.pin_tx_enable`, `radio.dio2_rf_switch` | `sx1262`: ВЧ-переключатель, какой бы его половиной плата ни распорядилась |
+| `radio.tcxo_millivolts` | `sx1262`: `0` для платы с обычным кварцем. Ошибка здесь — и чип не запустится вовсе |
+| `radio.tx_power`, `radio.current_limit_ma` | `sx1262`: дБм на выходе и сколько тока на это отпущено |
 | `routing.forward_airtime_factor`, `routing.forward_jitter` | Задержка транзита: эфирное время, умноженное на первое, плюс случайный разброс до второго |
 | `routing.max_routes` | Сколько выученных прямых маршрутов держать одновременно |
 | `routing.seen_slots`, `routing.seen_ttl_ms` | Кеш дубликатов: сколько пакетов помнить и как долго |
@@ -619,11 +662,24 @@ overlay фатален, а не игнорируется: подняться с 
 
 ### Драйверы радио
 
-`udp` переносит кадры по UDP между процессами на одной машине или узлами в
+Какое радио у узла, задаёт `-DRADIO=` при сборке, а не ключ в его конфиге.
+
+**`SX1262`** — настоящий: сам чип по SPI, через RadioLib и lgpio. Значения по
+умолчанию — распиновка Waveshare SX1262 XXXM LoRaWAN/GNSS HAT, взятая из драйвера
+самой платы; любая другая плата означает чтение её схемы. Две настройки при ошибке
+отказывают молча и полностью: `radio.tcxo_millivolts`, который на плате с обычным
+кварцем обязан быть `0`, и выводы ВЧ-переключателя, чьи надписи не всегда означают
+то, что на них написано. См. [src/radio/](src/radio/).
+
+**`UDP`** переносит кадры по UDP между процессами на одной машине или узлами в
 локальной сети, сохраняя настоящий учёт эфирного времени и рабочего цикла. Список
 соседей каждого узла и есть матрица видимости, поэтому цепочка A–B–C это три
-конфига, а не особый режим. `virtual` — общая среда внутри процесса, которую
-используют тесты. Драйвера SX1262 пока нет; RadioLib для него лежит в дереве.
+конфига, а не особый режим. Узел без соседей и без группы не слышит никого — так
+его и запускают в одиночку.
+
+Общая среда внутри процесса и воспроизведение дампа — не драйверы, а тестовая
+оснастка: их собирают из кода, а не выбирают в конфиге. См.
+[src/radio/](src/radio/).
 
 ### Сеть на одной машине
 

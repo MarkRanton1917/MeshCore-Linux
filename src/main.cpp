@@ -292,17 +292,21 @@ std::vector<uint8_t> buildAdvertPayload(const identity::Store& store,
 // stack above may steer by.
 uint32_t queueDepthOf(const radio::IRadio& device)
 {
+#if defined(SX1262_RADIO)
+  if (auto* chip = dynamic_cast<const radio::Sx1262Radio*>(&device)) return (uint32_t)chip->queueDepth();
+#elif defined(UDP_RADIO)
   if (auto* udp = dynamic_cast<const radio::UdpRadio*>(&device)) return (uint32_t)udp->queueDepth();
-  if (auto* fake = dynamic_cast<const radio::VirtualRadio*>(&device)) {
-    return (uint32_t)fake->queueDepth();
-  }
+#endif
   return 0;
 }
 
 uint32_t usedPermilleOf(const radio::IRadio& device)
 {
+#if defined(SX1262_RADIO)
+  if (auto* chip = dynamic_cast<const radio::Sx1262Radio*>(&device)) return chip->usedPermille();
+#elif defined(UDP_RADIO)
   if (auto* udp = dynamic_cast<const radio::UdpRadio*>(&device)) return udp->usedPermille();
-  if (auto* fake = dynamic_cast<const radio::VirtualRadio*>(&device)) return fake->usedPermille();
+#endif
   return 0;
 }
 
@@ -483,15 +487,44 @@ int main(int argc, char** argv)
   params.codingRate = (uint8_t)config.getInt("radio.coding_rate", params.codingRate);
   params.dutyCyclePercent = (uint8_t)config.getInt("radio.duty_cycle", params.dutyCyclePercent);
 
-  // Everything above talks to IRadio and nothing else, so the driver is a
-  // choice made here and nowhere else. The SX1262 one still needs RadioLib on
-  // real hardware.
-  const std::string driver = config.get("radio.driver", "virtual");
-
-  radio::Medium medium;
+  // Everything above talks to IRadio and nothing else, so which radio this is
+  // gets settled here and nowhere else -- at compile time, by -DRADIO=. A node
+  // cannot ask for hardware the binary was not built with, because there is no
+  // question to answer wrongly.
   std::unique_ptr<radio::IRadio> device;
 
-  if (driver == "udp") {
+#if defined(SX1262_RADIO)
+  {
+    radio::Sx1262Options chip;
+    chip.spiBus = (uint8_t)config.getInt("radio.spi_bus", chip.spiBus);
+    chip.spiChipSelect = (uint8_t)config.getInt("radio.spi_cs", chip.spiChipSelect);
+    chip.spiSpeedHz = (uint32_t)config.getInt("radio.spi_speed", chip.spiSpeedHz);
+    chip.gpioChip = (uint8_t)config.getInt("radio.gpio_chip", chip.gpioChip);
+    chip.pinNss = (int32_t)config.getInt("radio.pin_nss", chip.pinNss);
+    chip.pinBusy = (int32_t)config.getInt("radio.pin_busy", chip.pinBusy);
+    chip.pinReset = (int32_t)config.getInt("radio.pin_reset", chip.pinReset);
+    chip.pinDio1 = (int32_t)config.getInt("radio.pin_dio1", chip.pinDio1);
+    chip.pinRxEnable = (int32_t)config.getInt("radio.pin_rx_enable", chip.pinRxEnable);
+    chip.pinTxEnable = (int32_t)config.getInt("radio.pin_tx_enable", chip.pinTxEnable);
+    chip.dio2AsRfSwitch = config.getBool("radio.dio2_rf_switch", chip.dio2AsRfSwitch);
+    chip.useRegulatorLdo = config.getBool("radio.regulator_ldo", chip.useRegulatorLdo);
+    chip.txPowerDbm = (int8_t)config.getInt("radio.tx_power", chip.txPowerDbm);
+    chip.currentLimitMa = (float)config.getInt("radio.current_limit_ma", (long)chip.currentLimitMa);
+
+    // Millivolts, because the config reads integers and 1.6 would arrive as 1.
+    // Zero is a board with a plain crystal, which is a real answer and not a
+    // missing one.
+    chip.tcxoVoltage = (float)config.getInt("radio.tcxo_millivolts", 0) / 1000.0f;
+
+    auto chipDevice = std::make_unique<radio::Sx1262Radio>(chip, params);
+    if (!chipDevice->open()) {
+      platform::Log::write(platform::LogLevel::ERROR, "radio unavailable, refusing to start");
+      return 1;
+    }
+    device = std::move(chipDevice);
+  }
+#elif defined(UDP_RADIO)
+  {
     radio::UdpOptions udp;
     udp.bindAddress = config.get("radio.udp_bind", "127.0.0.1");
     udp.listenPort = (uint16_t)config.getInt("radio.udp_port", 0);
@@ -506,13 +539,9 @@ int main(int argc, char** argv)
     }
     device = std::move(udpDevice);
   }
-  else if (driver == "virtual") {
-    device = std::make_unique<radio::VirtualRadio>(medium, params);
-  }
-  else {
-    platform::Log::write(platform::LogLevel::ERROR, "unknown radio.driver '%s'", driver.c_str());
-    return 1;
-  }
+#else
+#error "no radio: configure the build with -DRADIO=UDP or -DRADIO=SX1262"
+#endif
 
   Receiver receiver(store, bus, clock);
   device->setSink(&receiver);
