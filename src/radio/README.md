@@ -108,8 +108,8 @@ the head of the queue.
     pins `pinNss`/`pinBusy`/`pinReset`/`pinDio1`, the RF switch
     (`pinRxEnable`/`pinTxEnable`/`dio2AsRfSwitch`), and
     `tcxoVoltage`/`useRegulatorLdo`/`txPowerDbm`/`currentLimitMa`. `-1` means "no
-    pin"; for `pinNss` that is not "absent" but "the SPI controller drives chip
-    select", which is what a board wired to CE0 wants.
+    pin"; for `pinNss` it means "the SPI controller drives chip select", which is
+    what a board wired to CE0 wants and this one does not.
   - `Sx1262Radio`: `open()` (false leaves the reason in the log — a radio that
     will not start has no useful degraded mode), the `IRadio` methods,
     `queueDepth()`, `usedPermille()`.
@@ -127,8 +127,11 @@ the head of the queue.
 ### Defaults, and the two that fail silently
 
 The defaults are the pinout of the Waveshare SX1262 XXXM LoRaWAN/GNSS HAT, read
-off that board's own driver: NSS on CE0 (`-1`), BUSY 20, RESET 18, DIO1 16.
-Nothing here can be probed, so another board means reading its schematic.
+off that board's own driver: NSS 21, BUSY 20, RESET 18, DIO1 16. Nothing here can
+be probed, so another board means reading its schematic. NSS is the one that
+looks optional and is not: it is an ordinary GPIO on this HAT, not a CE line, and
+left at `-1` the chip is never selected, every register reads back as nothing,
+and `begin()` returns `RADIOLIB_ERR_CHIP_NOT_FOUND` (-2).
 
 Two of them give no error when they are wrong, only silence:
 
@@ -259,8 +262,8 @@ radio instead of sniffing for it.
     `pinNss`/`pinBusy`/`pinReset`/`pinDio1`, ВЧ-переключатель
     (`pinRxEnable`/`pinTxEnable`/`dio2AsRfSwitch`) и
     `tcxoVoltage`/`useRegulatorLdo`/`txPowerDbm`/`currentLimitMa`. `-1` означает
-    «вывода нет»; для `pinNss` это не «отсутствует», а «выборкой кристалла
-    занимается контроллер SPI» — именно то, что нужно плате, посаженной на CE0.
+    «вывода нет»; для `pinNss` — «выборкой кристалла занимается контроллер SPI»,
+    что нужно плате, посаженной на CE0, а этой не нужно.
   - `Sx1262Radio`: `open()` (при false причина остаётся в логе — у радио, которое
     не запустилось, нет полезного урезанного режима), методы `IRadio`,
     `queueDepth()`, `usedPermille()`.
@@ -278,8 +281,11 @@ radio instead of sniffing for it.
 ### Значения по умолчанию и две настройки, отказывающие молча
 
 По умолчанию стоит распиновка Waveshare SX1262 XXXM LoRaWAN/GNSS HAT, взятая из
-драйвера самой платы: NSS на CE0 (`-1`), BUSY 20, RESET 18, DIO1 16. Ничего из
-этого нельзя опросить, поэтому другая плата означает чтение её схемы.
+драйвера самой платы: NSS 21, BUSY 20, RESET 18, DIO1 16. Ничего из этого нельзя
+опросить, поэтому другая плата означает чтение её схемы. NSS — тот вывод, который
+кажется необязательным и таковым не является: на этой плате это обычный GPIO, а
+не линия CE, и при `-1` кристалл никогда не выбирается, все регистры читаются как
+пустота, а `begin()` возвращает `RADIOLIB_ERR_CHIP_NOT_FOUND` (-2).
 
 Две из них при ошибке не дают никакой диагностики, только тишину:
 

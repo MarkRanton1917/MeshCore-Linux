@@ -20,6 +20,7 @@ static const char* kNames[] = {
   "client_logins",
   "posts_added",
   "routes_reset",
+  "adverts_echoed",
 };
 
 static_assert(sizeof(kNames) / sizeof(kNames[0]) == (size_t)EventType::Count, "every event type needs a metric name");
@@ -95,7 +96,7 @@ std::string telemetry::prometheusText(const Counters& counters)
 void telemetry::logCounters(const Counters& counters)
 {
   platform::Log::write(platform::LogLevel::INFO,
-    "rx=%llu tx=%llu dup=%llu undecryptable=%llu forwarded=%llu refused=%llu acktimeout=%llu "
+    "rx=%llu tx=%llu dup=%llu undecryptable=%llu forwarded=%llu refused=%llu acktimeout=%llu echo=%llu "
     "queue=%u duty=%u.%u%% dropped=%llu",
     (unsigned long long)counters.byType[(size_t)EventType::FrameRx],
     (unsigned long long)counters.byType[(size_t)EventType::FrameTx],
@@ -103,6 +104,7 @@ void telemetry::logCounters(const Counters& counters)
     (unsigned long long)counters.byType[(size_t)EventType::DecryptFailed],
     (unsigned long long)counters.byType[(size_t)EventType::Forwarded],
     (unsigned long long)counters.byType[(size_t)EventType::ForwardRefused],
-    (unsigned long long)counters.byType[(size_t)EventType::AckTimeout], counters.txQueueDepth,
+    (unsigned long long)counters.byType[(size_t)EventType::AckTimeout],
+    (unsigned long long)counters.byType[(size_t)EventType::AdvertEchoed], counters.txQueueDepth,
     counters.dutyCyclePermille / 10, counters.dutyCyclePermille % 10, (unsigned long long)counters.dropped);
 }

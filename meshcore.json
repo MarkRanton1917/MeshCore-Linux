@@ -22,7 +22,7 @@
     "spi_cs": 0,
     "spi_speed": 2000000,
     "gpio_chip": 0,
-    "pin_nss": -1,
+    "pin_nss": 21,
     "pin_busy": 20,
     "pin_reset": 18,
     "pin_dio1": 16,

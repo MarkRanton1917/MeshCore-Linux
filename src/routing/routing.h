@@ -189,6 +189,12 @@ private:
   bool alreadySeen(ByteView frame);
   void rememberSeen(ByteView frame);
   void queueFrame(std::vector<uint8_t> frame, Millis notBefore, Priority priority);
+
+  // The single door out to the radio, so that "how much did this node put on
+  // the air" is a question the counters can answer. Transit and retries went
+  // straight to the driver before, and a repeater carrying other people's
+  // traffic all day still reported one transmission.
+  void handToRadio(ByteView frame, Priority priority);
   void transmitNow(std::vector<uint8_t> frame, Priority priority);
 
   void deliverToSelf(const packet::Packet& p, ByteView payload);

@@ -16,8 +16,10 @@
 #include "routing.h"
 #include "telemetry.h"
 
+#include <cmath>
 #include <csignal>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <memory>
 #include <optional>
@@ -114,8 +116,27 @@ private:
     // Our own advert, handed back by a neighbour that forwarded it. Recording
     // it would waste a slot and put us in our own hash bucket, where every
     // packet from a node sharing our first byte would try to decrypt against a
-    // secret shared with ourselves.
+    // secret shared with ourselves. It is still worth counting on the way out:
+    // it is the one thing this node hears that proves its own transmissions
+    // arrive somewhere. Everything else in the log reads the same on a node
+    // whose antenna has fallen off.
     if (std::memcmp(advert->publicKey.data(), store_.selfPk().data.data(), PACKET_PUBLIC_KEY_SIZE) == 0) {
+      bus_.publish(telemetry::EventType::AdvertEchoed, (uint32_t)(meta.at / 1000));
+      if (!echoed_) {
+        echoed_ = true;
+
+        // The first hash in the path is whoever heard us off our own
+        // transmitter and passed it on, which is the neighbour worth naming.
+        // An empty path cannot happen on a half-duplex radio, so if it ever
+        // does, say so rather than name node 00.
+        if (parsed->hopCount > 0) {
+          platform::Log::write(platform::LogLevel::INFO,
+            "our advert came back from %02x: we are on the air and being heard", parsed->path[0]);
+        }
+        else {
+          platform::Log::write(platform::LogLevel::WARN, "our own advert came back with an empty path");
+        }
+      }
       return;
     }
 
@@ -137,6 +158,10 @@ private:
   telemetry::Bus& bus_;
   platform::SystemClock& clock_;
   routing::Router* router_ = nullptr;
+
+  // Logged once, counted always: the proof is worth a line the first time and
+  // noise every five minutes after that.
+  bool echoed_ = false;
 };
 
 // room only ever needs one thing from routing.
@@ -254,15 +279,73 @@ private:
   bool advertWanted_ = false;
 };
 
+// Where the node stands, in the units the advert uses: millionths of a degree,
+// signed, little-endian. Optional because a node that does not know cannot
+// guess, and a wrong position on somebody's map is worse than none.
+struct Location {
+  bool known = false;
+  int32_t latitude = 0;
+  int32_t longitude = 0;
+};
+
+// Degrees as they are written on a map. Out-of-range numbers are refused rather
+// than clamped: 55.75 typed as 5575 is a mistake, and a node that quietly
+// advertises the equator is a mistake nobody finds.
+Location locationFrom(const platform::Config& config)
+{
+  Location out;
+  if (!config.has("node.lat") && !config.has("node.lon")) return out;
+  if (!config.has("node.lat") || !config.has("node.lon")) {
+    platform::Log::write(
+      platform::LogLevel::ERROR, "node.lat and node.lon go together; advertising without a position");
+    return out;
+  }
+
+  const double latitude = std::strtod(config.get("node.lat").c_str(), nullptr);
+  const double longitude = std::strtod(config.get("node.lon").c_str(), nullptr);
+  if (latitude < -90.0 || latitude > 90.0 || longitude < -180.0 || longitude > 180.0) {
+    platform::Log::write(
+      platform::LogLevel::ERROR, "node.lat/node.lon are outside the globe; advertising without a position");
+    return out;
+  }
+
+  out.known = true;
+  out.latitude = (int32_t)std::llround(latitude * 1e6);
+  out.longitude = (int32_t)std::llround(longitude * 1e6);
+  return out;
+}
+
+void appendInt32(std::vector<uint8_t>& out, int32_t value)
+{
+  const uint32_t bits = (uint32_t)value;
+  out.push_back((uint8_t)(bits));
+  out.push_back((uint8_t)(bits >> 8));
+  out.push_back((uint8_t)(bits >> 16));
+  out.push_back((uint8_t)(bits >> 24));
+}
+
 // Our own advert: build it with an empty signature, sign the frame that
 // results, then put the signature back where it belongs.
+//
+// The appdata order is the flags byte, then the position, then the two feature
+// blocks, then the name — the same walk the receiving side does in identity's
+// applyAppdata, and the same one every node on the air already speaks.
 std::vector<uint8_t> buildAdvertPayload(const identity::Store& store,
   uint32_t timestamp,
   const std::string& name,
-  identity::NodeType type)
+  identity::NodeType type,
+  const Location& location)
 {
   std::vector<uint8_t> appdata;
-  appdata.push_back((uint8_t)((uint8_t)type | (name.empty() ? 0 : ADVERT_HAS_NAME)));
+  uint8_t flags = (uint8_t)type;
+  if (location.known) flags |= ADVERT_HAS_LOCATION;
+  if (!name.empty()) flags |= ADVERT_HAS_NAME;
+  appdata.push_back(flags);
+
+  if (location.known) {
+    appendInt32(appdata, location.latitude);
+    appendInt32(appdata, location.longitude);
+  }
   appdata.insert(appdata.end(), name.begin(), name.end());
 
   core::Signature blank {};
@@ -285,6 +368,7 @@ std::vector<uint8_t> buildAdvertPayload(const identity::Store& store,
   const core::Signature signature = protocol::packetSign(store.selfSk(), ByteView { frame.data(), frame.size() });
   std::memcpy(
     payload.data() + PACKET_PUBLIC_KEY_SIZE + PACKET_TIMESTAMP_SIZE, signature.data.data(), PACKET_SIGNATURE_SIZE);
+
   return payload;
 }
 
@@ -385,10 +469,31 @@ const char* nameOf(room::NodeType type)
   return "room";
 }
 
+const char* nameOf(identity::NodeType type)
+{
+  switch (type) {
+  case identity::NodeType::CHAT:
+    return "chat node";
+  case identity::NodeType::REPEATER:
+    return "repeater";
+  case identity::NodeType::ROOM_SERVER:
+    return "room server";
+  case identity::NodeType::SENSOR:
+    return "sensor";
+  case identity::NodeType::UNKNOWN:
+    break;
+  }
+  return "node of no stated type";
+}
+
 // What the network is told this node is. Only one value fits the four bits an
 // advert has for it, so a node that keeps a board is a room server first:
 // clients look for that, and nothing in an advert says whether a node repeats.
 // A node with no board has nothing else to claim, and says repeater.
+//
+// Derived, never configured: the node already knows which of the three it is,
+// and a second setting saying otherwise would be a second answer to a question
+// that has one.
 identity::NodeType advertisedAs(room::NodeType type)
 {
   return room::keepsBoard(type) ? identity::NodeType::ROOM_SERVER : identity::NodeType::REPEATER;
@@ -631,8 +736,17 @@ int main(int argc, char** argv)
   platform::Millis nextAdvert = 0;
   platform::Millis nextReport = 0;
 
+  // Decided once: neither changes while the node runs, and an advert built from
+  // them goes out every few minutes.
+  const identity::NodeType claimedType = advertisedAs(nodeType);
+  const Location location = locationFrom(config);
+
   platform::Log::write(platform::LogLevel::INFO, "started as '%s', a %s, advertising as a %s", admin.nodeName().c_str(),
-    nameOf(nodeType), advertisedAs(nodeType) == identity::NodeType::REPEATER ? "repeater" : "room server");
+    nameOf(nodeType), nameOf(claimedType));
+  if (location.known) {
+    platform::Log::write(platform::LogLevel::INFO, "advertising a position of %.6f, %.6f",
+      (double)location.latitude / 1e6, (double)location.longitude / 1e6);
+  }
 
   while (stopping == 0) {
     const platform::Millis now = clock.mono();
@@ -652,7 +766,7 @@ int main(int argc, char** argv)
     // network holds the old name until the next advert goes out.
     if (now >= nextAdvert || admin.takeAdvertRequest()) {
       const std::vector<uint8_t> payload =
-        buildAdvertPayload(store, clock.wall(), admin.nodeName(), advertisedAs(nodeType));
+        buildAdvertPayload(store, clock.wall(), admin.nodeName(), claimedType, location);
       if (!payload.empty()) {
         router.sendFlood(packet::PayloadType::ADVERT, ByteView { payload.data(), payload.size() });
       }

@@ -82,11 +82,24 @@ bool Sx1262Radio::open()
   int16_t state = device_->radio.begin(frequencyMhz, bandwidthKhz, params_.spreadingFactor, params_.codingRate,
     params_.syncWord, options_.txPowerDbm, params_.preambleSymbols, options_.tcxoVoltage, options_.useRegulatorLdo);
   if (state != RADIOLIB_ERR_NONE) {
-    // Nearly always one of two things, and neither reports itself: a pin number
-    // belonging to some other board, or a TCXO voltage on a board that has a
-    // crystal instead. Both leave the chip mute rather than complaining.
-    platform::Log::write(platform::LogLevel::ERROR,
-      "sx1262: begin failed (%d) -- check the pin numbers, and the TCXO voltage above all", state);
+    // The two halves are worth telling apart, because they send you to opposite
+    // ends of the board. RADIOLIB_ERR_CHIP_NOT_FOUND means the version register
+    // read back as nothing at all: the chip is not on the bus, which is wiring
+    // and never the oscillator -- begin() looks for the chip before it sets the
+    // TCXO, and finds its way to the crystal by itself when the voltage is
+    // wrong. Anything else came back from a chip that is answering, and there
+    // the TCXO voltage is the first suspect.
+    if (state == RADIOLIB_ERR_CHIP_NOT_FOUND) {
+      platform::Log::write(platform::LogLevel::ERROR,
+        "sx1262: the chip does not answer (%d) -- check NSS (%d), BUSY (%d), RESET (%d), gpiochip%u and "
+        "/dev/spidev%u.%u. NSS of -1 is right only where the board wires it to a CE line",
+        state, (int)options_.pinNss, (int)options_.pinBusy, (int)options_.pinReset, (unsigned)options_.gpioChip,
+        (unsigned)options_.spiBus, (unsigned)options_.spiChipSelect);
+    }
+    else {
+      platform::Log::write(platform::LogLevel::ERROR,
+        "sx1262: begin failed (%d) -- the chip answers, so this is a setting: the TCXO voltage above all", state);
+    }
     device_.reset();
     return false;
   }

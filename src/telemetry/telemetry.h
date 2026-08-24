@@ -36,6 +36,11 @@ enum class EventType : uint8_t {
   ClientLogin,
   PostAdded,
   RouteReset,
+
+  // Our own advert, rebroadcast by a neighbour and heard back. The one event
+  // that says the transmitter reaches somebody: every other counter here would
+  // read exactly the same on a node whose antenna had fallen off.
+  AdvertEchoed,
   Count
 };
 

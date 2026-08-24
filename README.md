@@ -106,6 +106,7 @@ Configuration is [meshcore.json](meshcore.json); every key has a default:
 | `node.type` | `room`, `repeater` or `room-repeater` — what this node is. See [node types](#node-types) |
 | `node.flush_ms` | How often state is written (lazily — a write per advert would wear out the card) |
 | `node.advert_ms` | Advert interval |
+| `node.lat`, `node.lon` | Optional position in degrees, advertised so clients can place this node on a map. Both or neither |
 | `log.level` | `error`, `warn`, `info`, `debug` |
 | `radio.udp_bind`, `radio.udp_port` | Local socket; port `0` lets the kernel choose |
 | `radio.udp_peers` | `"host:port"` each — who hears this node |
@@ -114,7 +115,7 @@ Configuration is [meshcore.json](meshcore.json); every key has a default:
 | `radio.duty_cycle` | Percent per sliding hour (10 on 868 MHz in Europe) |
 | `radio.spi_bus`, `radio.spi_cs`, `radio.spi_speed` | `sx1262`: SPI0 chip-select 0 is `/dev/spidev0.0` |
 | `radio.gpio_chip` | `sx1262`: `0` through the Pi 4, `4` on the Pi 5 |
-| `radio.pin_nss`, `radio.pin_busy`, `radio.pin_reset`, `radio.pin_dio1` | `sx1262`: BCM numbers; `pin_nss` of `-1` leaves chip select to the SPI controller |
+| `radio.pin_nss`, `radio.pin_busy`, `radio.pin_reset`, `radio.pin_dio1` | `sx1262`: BCM numbers. On this HAT NSS is BCM 21, a plain pin the driver drives; `-1` hands chip select to the SPI controller, which only a board wired to a CE line wants |
 | `radio.pin_rx_enable`, `radio.pin_tx_enable`, `radio.dio2_rf_switch` | `sx1262`: the RF switch, whichever half of it the board wires where |
 | `radio.tcxo_millivolts` | `sx1262`: `0` for a board with a plain crystal. Wrong here and the chip never starts |
 | `radio.tx_power`, `radio.current_limit_ma` | `sx1262`: dBm at the PA, and how much it may draw getting there |
@@ -163,6 +164,22 @@ anywhere keeps a second opinion.
 Only one value fits the four bits an advert has for a node type, so a node with a
 board advertises as a room server whichever of the two it is: clients look for
 that, and nothing on air says whether a node repeats.
+
+It is derived from `node.type` and there is no setting for it: the node already
+knows which of the three it is, and a second key saying otherwise would be a
+second answer to a question that has one.
+
+Worth knowing before running a `room-repeater`, because the advert is the only
+thing a client sees: some clients add repeaters to their contact list on their
+own and room servers they do not, so a node with a board can be heard by
+everybody, relayed onward by its neighbours, and still appear in nobody's
+contacts. It is reached by adding it deliberately, the way a room server is
+meant to be reached.
+
+`node.lat` and `node.lon` are the other half of what clients show. They are
+optional, they must be given together, and they are refused rather than clamped
+when they fall off the globe: a node that quietly advertises the equator is a
+mistake nobody ever finds.
 
 The type is read once at startup. Changing it means editing the config and
 restarting; `set repeat on|off` over the air is the kill switch for a node that
@@ -469,6 +486,7 @@ cmake -S . -B build -DRADIO=SX1262     # на Raspberry Pi
 | `node.type` | `room`, `repeater` или `room-repeater` — чем является этот узел. См. [типы узла](#типы-узла) |
 | `node.flush_ms` | Как часто записывается состояние (лениво — запись на каждое объявление износила бы карту) |
 | `node.advert_ms` | Интервал между объявлениями |
+| `node.lat`, `node.lon` | Необязательные координаты в градусах, объявляемые сети, чтобы клиенты поставили узел на карту. Оба или ни одного |
 | `log.level` | `error`, `warn`, `info`, `debug` |
 | `radio.udp_bind`, `radio.udp_port` | Локальный сокет; порт `0` выбирает ядро |
 | `radio.udp_peers` | По `"host:port"` каждый — кто слышит этот узел |
@@ -477,7 +495,7 @@ cmake -S . -B build -DRADIO=SX1262     # на Raspberry Pi
 | `radio.duty_cycle` | Проценты за скользящий час (10 на 868 МГц в Европе) |
 | `radio.spi_bus`, `radio.spi_cs`, `radio.spi_speed` | `sx1262`: SPI0 с выборкой 0 — это `/dev/spidev0.0` |
 | `radio.gpio_chip` | `sx1262`: `0` по Pi 4 включительно, `4` на Pi 5 |
-| `radio.pin_nss`, `radio.pin_busy`, `radio.pin_reset`, `radio.pin_dio1` | `sx1262`: номера BCM; `pin_nss` со значением `-1` оставляет выборку кристалла контроллеру SPI |
+| `radio.pin_nss`, `radio.pin_busy`, `radio.pin_reset`, `radio.pin_dio1` | `sx1262`: номера BCM. На этой плате NSS — это BCM 21, обычный вывод, которым управляет драйвер; `-1` отдаёт выборку кристалла контроллеру SPI, а это нужно только плате, посаженной на линию CE |
 | `radio.pin_rx_enable`, `radio.pin_tx_enable`, `radio.dio2_rf_switch` | `sx1262`: ВЧ-переключатель, какой бы его половиной плата ни распорядилась |
 | `radio.tcxo_millivolts` | `sx1262`: `0` для платы с обычным кварцем. Ошибка здесь — и чип не запустится вовсе |
 | `radio.tx_power`, `radio.current_limit_ma` | `sx1262`: дБм на выходе и сколько тока на это отпущено |
@@ -527,6 +545,21 @@ cmake -S . -B build -DRADIO=SX1262     # на Raspberry Pi
 значение, поэтому узел с доской объявляется сервером комнаты, каким бы из двух он
 ни был: клиенты ищут именно это, а о том, ретранслирует ли узел, в эфире не
 говорится ничего.
+
+Это значение выводится из `node.type`, и настройки для него нет: узел и так
+знает, какой он из трёх, а второй ключ, говорящий иначе, был бы вторым ответом
+на вопрос, у которого ответ один.
+
+О чём стоит знать, запуская `room-repeater`, потому что объявление — это всё,
+что видит клиент: некоторые клиенты сами добавляют в контакты ретрансляторы и не
+добавляют серверы комнат, так что узел с доской может быть слышен всем,
+повторяться соседями и при этом не появиться ни у кого в контактах. К нему
+приходят, добавив его намеренно, — как к серверу комнаты и положено.
+
+`node.lat` и `node.lon` — вторая половина того, что показывают клиенты. Они
+необязательны, задаются только парой и при выходе за пределы глобуса
+отвергаются, а не подрезаются: узел, тихо объявивший себя на экваторе, — ошибка,
+которую никто никогда не найдёт.
 
 Тип читается один раз при старте. Сменить его — значит поправить конфигурацию и
 перезапустить; `set repeat on|off` по эфиру это выключатель для узла, который уже

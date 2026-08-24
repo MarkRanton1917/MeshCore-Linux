@@ -11,6 +11,7 @@
 
 #include "check.h"
 #include "routing.h"
+#include "telemetry.h"
 
 #include <sys/stat.h>
 #include <unistd.h>
@@ -678,6 +679,45 @@ static void testForwardingPolicy()
   that("a refusing repeater stops the packet", net.node(c).delegate.payloads.empty());
 }
 
+// The counter that answers "is this node putting anything on the air at all",
+// which is the first question asked of a repeater nobody can see. Transit and
+// retries used to reach the driver without passing the counter, so a repeater
+// carrying a day of other people's traffic still reported one transmission.
+static void testTransitIsCounted()
+{
+  section("routing: every frame handed to the radio is counted");
+
+  telemetry::Bus bus(64);
+  routing::Config relaying;
+  relaying.bus = &bus;
+
+  Network net;
+  const size_t a = net.add(), r = net.add(relaying), c = net.add();
+  net.link(a, r);
+  net.link(r, c);
+  net.introduceAll();
+
+  const auto payload = textPayload("counted");
+  net.node(a).router->sendDirect(
+    net.node(c).store.selfPk(), packet::PayloadType::TXT_MSG, ByteView { payload.data(), payload.size() }, true);
+  net.run(3000);
+
+  telemetry::Collector collector;
+  collector.drain(bus);
+  const auto& counters = collector.counters();
+  const uint64_t sent = counters.byType[(size_t)telemetry::EventType::FrameTx];
+  const uint64_t forwarded = counters.byType[(size_t)telemetry::EventType::Forwarded];
+
+  that("the repeater carried something", forwarded > 0);
+  that("everything it carried was counted as transmitted", sent == forwarded);
+  size_t reachedTheRadio = 0;
+  for (const auto& [source, frame] : net.transmitted) {
+    (void)frame;
+    if (source == r) reachedTheRadio++;
+  }
+  that("the radio saw exactly as many frames", reachedTheRadio == sent);
+}
+
 int main()
 {
   if (!core::init(scriptedRandom)) {
@@ -697,6 +737,7 @@ int main()
   testAnonRequest();
   testGroupDelivery();
   testForwardingPolicy();
+  testTransitIsCounted();
 
   return check::report();
 }

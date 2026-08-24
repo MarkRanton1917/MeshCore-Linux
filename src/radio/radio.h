@@ -274,10 +274,12 @@ struct Sx1262Options {
   uint32_t spiSpeedHz = 2000000; // the chip takes 18 MHz; the ribbon is the limit
   uint8_t gpioChip = 0; // gpiochip0 through the Pi 4; the Pi 5 moved it to 4
 
-  // -1 for NSS does not mean "absent": this HAT wires the chip to CE0, so the
-  // SPI controller drives chip select and the driver must keep its hands off
-  // it. A board that puts NSS on a spare pin names that pin here instead.
-  int32_t pinNss = -1;
+  // NSS is a plain GPIO on this HAT rather than one of the SPI controller's CE
+  // lines, so the driver drives it itself. -1 remains legal and still means
+  // "the SPI controller owns chip select", for a board that does wire NSS to
+  // CE0 or CE1; on this one it leaves the chip permanently unselected, every
+  // register reads back as nothing, and begin() reports error -2.
+  int32_t pinNss = 21;
   int32_t pinBusy = 20;
   int32_t pinReset = 18;
   int32_t pinDio1 = 16;

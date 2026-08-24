@@ -23,11 +23,17 @@ Files: [telemetry.h](telemetry.h), [telemetry.cpp](telemetry.cpp). Tests:
 
 `FrameRx`, `FrameTx`, `FrameDuplicate`, `DecryptFailed`, `Forwarded`,
 `ForwardRefused`, `AckTimeout`, `ContactAdded`, `ClientLogin`, `PostAdded`,
-`RouteReset`, and `Count` as the array bound.
+`RouteReset`, `AdvertEchoed`, and `Count` as the array bound.
 
 `ForwardRefused` is one number on purpose: *why* the transit policy refused is the
 [repeater](../repeater/)'s own business and is counted there. What a graph needs
 to show is transit falling off.
+
+`FrameTx` counts every frame handed to the radio, transit and retries included,
+not only the ones this node originated. `AdvertEchoed` is the node's own advert
+heard back after a neighbour rebroadcast it, and it is the only counter here that
+says the transmitter reaches anybody: a node whose antenna has fallen off still
+receives, still forwards, and still reports everything else exactly the same.
 
 ### `struct Event`
 
@@ -92,11 +98,17 @@ the node is overloaded, and you want to see that before people complain. Also
 
 `FrameRx`, `FrameTx`, `FrameDuplicate`, `DecryptFailed`, `Forwarded`,
 `ForwardRefused`, `AckTimeout`, `ContactAdded`, `ClientLogin`, `PostAdded`,
-`RouteReset` и `Count` как граница массива.
+`RouteReset`, `AdvertEchoed` и `Count` как граница массива.
 
 `ForwardRefused` намеренно один: *почему* транзитная политика отказала — это дело
 [repeater](../repeater/), и там это и считается. Графику нужно показать, что
 транзит просел.
+
+`FrameTx` считает каждый кадр, отданный радио, включая транзит и повторы, а не
+только то, что узел отправил от своего имени. `AdvertEchoed` — собственный advert,
+услышанный обратно после того, как его повторил сосед; это единственный счётчик
+здесь, который говорит, что передатчик до кого-то доходит: узел с отвалившейся
+антенной так же принимает, так же пересылает и так же выглядит во всём остальном.
 
 ### `struct Event`
 

@@ -85,13 +85,18 @@ void Router::queueFrame(std::vector<uint8_t> frame, Millis notBefore, Priority p
   queue_.push_back(Delayed { notBefore, priority, std::move(frame) });
 }
 
+void Router::handToRadio(ByteView frame, Priority priority)
+{
+  publish(config_.bus, telemetry::EventType::FrameTx, now_, (uint32_t)frame.size());
+  radio_.enqueue(frame, priority);
+}
+
 void Router::transmitNow(std::vector<uint8_t> frame, Priority priority)
 {
   // Our own packets go into the dedup cache before they leave, or the first
   // neighbour will hand our flood straight back and we will forward it.
   rememberSeen(ByteView { frame.data(), frame.size() });
-  publish(config_.bus, telemetry::EventType::FrameTx, now_, (uint32_t)frame.size());
-  radio_.enqueue(ByteView { frame.data(), frame.size() }, priority);
+  handToRadio(ByteView { frame.data(), frame.size() }, priority);
 }
 
 // ------------------------------------------------------------------ routes
@@ -504,7 +509,7 @@ void Router::tick(Millis now)
     std::vector<uint8_t> frame = std::move(queue_[i].frame);
     const Priority priority = queue_[i].priority;
     queue_.erase(queue_.begin() + (long)i);
-    radio_.enqueue(ByteView { frame.data(), frame.size() }, priority);
+    handToRadio(ByteView { frame.data(), frame.size() }, priority);
   }
 
   for (size_t i = 0; i < pending_.size();) {
@@ -530,7 +535,7 @@ void Router::tick(Millis now)
 
     entry.attempts++;
     entry.deadline = now_ + (entry.viaFlood ? config_.floodAckTimeout : config_.directAckBase);
-    radio_.enqueue(ByteView { entry.frame.data(), entry.frame.size() }, Priority::NORMAL);
+    handToRadio(ByteView { entry.frame.data(), entry.frame.size() }, Priority::NORMAL);
     i++;
   }
 }
