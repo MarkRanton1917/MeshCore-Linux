@@ -31,6 +31,11 @@ struct Sender {
   virtual ~Sender() = default;
   virtual SendId sendDirect(const PublicKey& to, packet::PayloadType type, ByteView payload, bool wantAck) = 0;
 
+  // An ack is not an encrypted payload and cannot go through sendDirect: it is
+  // four bytes of a hash in the clear, plus whatever the answer carries on the
+  // end. A keep-alive is answered with one of these and nothing else.
+  virtual void sendAck(const PublicKey& to, uint32_t value, ByteView extra) = 0;
+
   // Channel traffic goes to nobody in particular, so it floods. There is no ack
   // to wait for and no route to learn: whoever holds the key and hears it, has
   // it, and whoever does not is not counted.
@@ -213,6 +218,11 @@ public:
 
   // ---- routing::Delegate
   void onAnon(const PublicKey& from, ByteView plain) override;
+
+  // Everybody logged in whose key starts with this byte. Routing asks because
+  // an envelope carries only that byte, and a client that logged in without
+  // ever advertising is in no other list on this node.
+  size_t keysMatching(uint8_t hash, std::span<PublicKey> out) override;
   void onPayload(const identity::Contact& from, packet::PayloadType type, ByteView plain) override;
   void onGroup(packet::PayloadType type, ByteView payload) override;
   void onAck(SendId id) override;
@@ -278,6 +288,10 @@ private:
   void publishToChannels(const Post& post);
 
   void sendStatusResponse(const Client& client, RequestType type);
+
+  // The answer to a keep-alive: a bare ack with the unread count on the end,
+  // hashed over the request as the client hashed it.
+  void sendKeepAliveAck(const Client& client, ByteView plain);
 
   const Post* nextPostFor(const Client& client) const;
 

@@ -14,11 +14,20 @@
 //     before decrypting, which rules out a padding oracle.
 //  2. The HMAC key is the whole shared secret; the AES key is its first
 //     16 bytes.
-//  3. PKCS#7 padding, and a whole block is added even when the length already
-//     divides evenly. Only because it is self-describing can open() report an
-//     exact plaintext length.
+//  3. PKCS#7 padding on the way out, and a whole block is added even when the
+//     length already divides evenly. On the way in the padding is whatever the
+//     peer used: PKCS#7 is preferred because it is self-describing and gives an
+//     exact length, zero padding is accepted because that is what the clients
+//     in the field send, and a block that is neither is handed up whole. The
+//     MAC has already been checked by then, so leniency here costs nothing:
+//     nobody without the key can reach this code.
 //  4. cipherKeyFrom() truncates the ECDH result with no KDF. That is what the
 //     protocol does; hashing it would be stronger but would not interoperate.
+//  5. An ack is SHA-256 over the decrypted plaintext followed by the sending
+//     node's public key, first four bytes, little-endian on the wire. Hashing
+//     the ciphertext instead is the plausible reading, and it is wrong: the
+//     receiver would have to keep the ciphertext to answer, and the firmware
+//     hashes what it decrypted. See expectedAck().
 
 using namespace crypto;
 using namespace crypto::protocol;
@@ -124,20 +133,35 @@ std::optional<size_t> crypto::protocol::open(const SharedSecret& secret,
 
   if (!core::aesDecrypt(cipherKeyFrom(secret), ciphertext, out)) return std::nullopt;
 
-  // Padding is checked after authentication, so leaving early here tells an
-  // attacker nothing: only someone holding the key gets this far.
+  // Padding is inspected after authentication, so nothing here tells an
+  // attacker anything: only someone holding the key gets this far. Which is
+  // also why a block that fits no convention is handed up whole rather than
+  // rejected — the sender is authenticated either way, and refusing it would
+  // only lose a message that is genuinely ours.
   const size_t length = ciphertext.size();
+
+  // PKCS#7, our own convention: self-describing, so it gives an exact length.
   const std::uint8_t pad = out[length - 1];
-  if (pad == 0 || pad > PACKET_CIPHER_BLOCK_SIZE || pad > length) return std::nullopt;
-  for (size_t i = length - pad; i < length; i++) {
-    if (out[i] != pad) return std::nullopt;
+  if (pad != 0 && pad <= PACKET_CIPHER_BLOCK_SIZE && pad <= length) {
+    bool consistent = true;
+    for (size_t i = length - pad; i < length; i++) {
+      if (out[i] != pad) consistent = false;
+    }
+    if (consistent) return length - pad;
   }
-  return length - pad;
+
+  // Zero padding: the last block filled out with NULs, which is what the
+  // clients in the field send. Ambiguous with a plaintext that really ends in
+  // NULs, and that ambiguity is the reason it is second rather than first.
+  size_t trimmed = length;
+  while (trimmed > 0 && out[trimmed - 1] == 0)
+    trimmed--;
+  return trimmed;
 }
 
-std::uint32_t crypto::protocol::expectedAck(ByteView payload, const PublicKey& recipient)
+std::uint32_t crypto::protocol::expectedAck(ByteView plaintext, const PublicKey& sender)
 {
-  const ByteView chunks[] = { payload, recipient.view() };
+  const ByteView chunks[] = { plaintext, sender.view() };
   const Hash digest = core::sha256(chunks);
 
   return static_cast<std::uint32_t>(digest.data[0]) | (static_cast<std::uint32_t>(digest.data[1]) << 8)

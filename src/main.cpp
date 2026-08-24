@@ -186,6 +186,11 @@ public:
     if (router_ != nullptr) router_->sendFlood(type, payload);
   }
 
+  void sendAck(const core::PublicKey& to, uint32_t value, ByteView extra) override
+  {
+    if (router_ != nullptr) router_->sendAck(to, value, extra);
+  }
+
 private:
   routing::Router* router_ = nullptr;
 };

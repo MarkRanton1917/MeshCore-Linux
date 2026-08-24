@@ -232,8 +232,34 @@ void Router::deliverToSelf(const packet::Packet& p, ByteView payload)
 
   // One byte of source hash is ambiguous, so every candidate is tried; the MAC
   // that checks out is the real identification.
-  for (const identity::Contact* candidate : store_.findByHash(envelope->sourceHash)) {
-    const auto* secret = store_.secretFor(candidate->pk);
+  //
+  // Candidates come from two places, because two different packets can name a
+  // sender. The store knows everybody who has advertised. The delegate knows
+  // everybody who logged in — a login carries a whole key — and those two sets
+  // do not have to overlap: a client can talk to a room for hours without ever
+  // sending an advert the room happened to hear.
+  const auto contacts = store_.findByHash(envelope->sourceHash);
+
+  std::array<PublicKey, MAX_LOGGED_IN_CANDIDATES> loggedIn;
+  const size_t loggedInCount = delegate_.keysMatching(envelope->sourceHash, std::span<PublicKey> { loggedIn });
+
+  const size_t candidates = contacts.size() + loggedInCount;
+
+  for (size_t i = 0; i < candidates; i++) {
+    // A contact where we have one, the bare key where we do not. What the
+    // delegate reads off it is the key; the rest is what an advert would have
+    // filled in and nothing here can invent.
+    identity::Contact bare;
+    const bool advertised = i < contacts.size();
+    if (advertised) {
+      bare = *contacts[i];
+    }
+    else {
+      bare.pk = loggedIn[i - contacts.size()];
+    }
+    const identity::Contact& candidate = advertised ? *contacts[i] : bare;
+
+    const auto* secret = store_.secretFor(candidate.pk);
     if (secret == nullptr) continue;
 
     protocol::Mac mac;
@@ -248,32 +274,26 @@ void Router::deliverToSelf(const packet::Packet& p, ByteView payload)
 
     // A flood that reached us carries the path it took; reversed, that is the
     // way back.
-    if (p.routeType() == packet::RouteType::FLOOD) learnRouteFrom(p, candidate->pk);
+    if (p.routeType() == packet::RouteType::FLOOD) learnRouteFrom(p, candidate.pk);
 
     // A returned path is routing's own business, not the layer above.
     if (p.payloadType() == packet::PayloadType::PATH) {
       if (auto returned = packet::decodePath(ByteView { plain.data(), *length })) {
-        installRoute(candidate->pk, returned->path);
+        installRoute(candidate.pk, returned->path);
       }
       return;
     }
 
     const ByteView plainView { plain.data(), *length };
-    delegate_.onPayload(*candidate, p.payloadType(), plainView);
+    delegate_.onPayload(candidate, p.payloadType(), plainView);
 
     if (!delegate_.shouldAck(p.payloadType(), plainView)) return;
 
-    // Acknowledge what we could read, so the sender can stop retrying.
-    const uint32_t ack = protocol::expectedAck(envelope->ciphertext, store_.selfPk());
-    std::vector<uint8_t> ackPayload(4);
-    for (int i = 0; i < 4; i++)
-      ackPayload[(size_t)i] = (uint8_t)(ack >> (8 * i));
-
-    const Route* route = findRoute(candidate->pk);
-    std::vector<uint8_t> ackFrame =
-      buildFrame(packet::PayloadType::ACK, ByteView { ackPayload.data(), ackPayload.size() }, route != nullptr,
-        route ? ByteView { route->path.data(), route->path.size() } : ByteView {});
-    transmitNow(std::move(ackFrame), Priority::HIGH);
+    // Acknowledge what we could read, so the sender can stop retrying. Over the
+    // plaintext and the sender's key: they hashed the same two things before
+    // sending, and this has to come out at the same number or every message
+    // they send reads as undelivered and is sent again.
+    sendAck(candidate.pk, protocol::expectedAck(plainView, candidate.pk), ByteView {});
     return;
   }
 }
@@ -469,7 +489,9 @@ SendId Router::sendDirect(const PublicKey& to, packet::PayloadType type, ByteVie
   if (wantAck && pending_.size() < config_.maxPending) {
     Pending entry;
     entry.id = id;
-    entry.expectedAck = protocol::expectedAck(envelope.ciphertext, to);
+    // Our own plaintext and our own key: we are the sender, and the peer will
+    // hash exactly this pair when it answers.
+    entry.expectedAck = protocol::expectedAck(payload, store_.selfPk());
     entry.viaFlood = route == nullptr;
     entry.deadline = now_
       + (entry.viaFlood ? config_.floodAckTimeout :
@@ -487,6 +509,20 @@ SendId Router::sendDirect(const PublicKey& to, packet::PayloadType type, ByteVie
 void Router::sendFlood(packet::PayloadType type, ByteView payload)
 {
   transmitNow(buildFrame(type, payload, false, ByteView {}), Priority::NORMAL);
+}
+
+void Router::sendAck(const PublicKey& to, uint32_t value, ByteView extra)
+{
+  std::vector<uint8_t> payload;
+  payload.reserve(4 + extra.size());
+  for (int i = 0; i < 4; i++)
+    payload.push_back((uint8_t)(value >> (8 * i)));
+  payload.insert(payload.end(), extra.begin(), extra.end());
+
+  const Route* route = findRoute(to);
+  transmitNow(buildFrame(packet::PayloadType::ACK, ByteView { payload.data(), payload.size() }, route != nullptr,
+                route ? ByteView { route->path.data(), route->path.size() } : ByteView {}),
+    Priority::HIGH);
 }
 
 // ------------------------------------------------------------------ tick

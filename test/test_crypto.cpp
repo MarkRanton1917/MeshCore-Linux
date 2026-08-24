@@ -477,26 +477,34 @@ static void testExpectedAck()
   std::vector<uint8_t> payload { 9, 8, 7, 6 };
   const uint32_t ack = protocol::expectedAck(view(payload), bob.pk);
   that("deterministic", protocol::expectedAck(view(payload), bob.pk) == ack);
-  that("depends on the recipient", protocol::expectedAck(view(payload), alice.pk) != ack);
+  that("depends on whose key it is", protocol::expectedAck(view(payload), alice.pk) != ack);
 
   std::vector<uint8_t> otherPayload { 9, 8, 7, 5 };
   that("depends on the payload", protocol::expectedAck(view(otherPayload), bob.pk) != ack);
   that("empty payload does not crash", protocol::expectedAck(ByteView {}, bob.pk) != 0);
 
-  // The trap: the ACK must be computed over what went on air, the ciphertext.
-  // Feeding it the plaintext looks fine until every message reads as undelivered.
+  // The trap, and it is the other way round from how it reads: the ack is over
+  // the *plaintext*, and over the *sender's* key. Hashing the ciphertext is the
+  // plausible mistake — it is what went on air — and it costs nothing until a
+  // real peer answers, at which point every message reads as undelivered and is
+  // sent again forever. Alice sends, so Alice's key is in both hashes.
   std::vector<uint8_t> plain { 'h', 'e', 'l', 'l', 'o' };
   std::vector<uint8_t> cipher(64), out(64);
   auto sealed = *protocol::seal(secret, view(plain), ByteSpan { cipher.data(), cipher.size() });
   const size_t length = sealed.ciphertextLength;
 
-  const uint32_t sent = protocol::expectedAck(ByteView { cipher.data(), length }, bob.pk);
+  // What Alice waits for, computed before the packet leaves.
+  const uint32_t sent = protocol::expectedAck(view(plain), alice.pk);
+
+  // What Bob answers with, computed from what he decrypted.
   auto opened =
     protocol::open(secret, sealed.mac, ByteView { cipher.data(), length }, ByteSpan { out.data(), out.size() });
-  const uint32_t replied = protocol::expectedAck(ByteView { cipher.data(), length }, bob.pk);
-  that("both sides agree over the ciphertext", opened && sent == replied);
-  that(
-    "the plaintext gives a different value", protocol::expectedAck(ByteView { out.data(), *opened }, bob.pk) != sent);
+  const uint32_t replied = protocol::expectedAck(ByteView { out.data(), opened ? *opened : 0 }, alice.pk);
+
+  that("the receiver arrives at the sender's number", opened && *opened == plain.size() && sent == replied);
+  that("the ciphertext gives a different value",
+    protocol::expectedAck(ByteView { cipher.data(), length }, alice.pk) != sent);
+  that("so does the answering node's own key", protocol::expectedAck(view(plain), bob.pk) != sent);
 }
 
 // ------------------------------------------------------------------ main

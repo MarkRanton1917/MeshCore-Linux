@@ -56,6 +56,23 @@ struct Delegate {
   // contact yet, so there is no contact to hand over — only the raw key.
   virtual void onAnon(const PublicKey& from, ByteView plain) = 0;
 
+  // Who else could have sent an envelope stamped with this source hash.
+  //
+  // The store can only answer for somebody who has advertised, because an
+  // advert is the one packet that names its sender in the clear. A login names
+  // its sender too — the whole key travels inside an ANON_REQ — so a client can
+  // be known to the delegate and a complete stranger to the store, and without
+  // this every message it sends after logging in would be dropped unread.
+  //
+  // Fills out with matching keys and returns how many. The default answers for
+  // nobody, which is right for any delegate that keeps no such list.
+  virtual size_t keysMatching(uint8_t hash, std::span<PublicKey> out)
+  {
+    (void)hash;
+    (void)out;
+    return 0;
+  }
+
   // Channel traffic, handed up as it came off the air. routing holds no channel
   // keys and cannot tell whether this one is even addressed to us, so it does
   // not try: the layer that holds the key decides by whether the MAC checks out.
@@ -142,6 +159,11 @@ public:
 
   SendId sendDirect(const PublicKey& to, packet::PayloadType type, ByteView payload, bool wantAck);
   void sendFlood(packet::PayloadType type, ByteView payload);
+
+  // Four bytes of ack, in the clear, plus whatever the answer appends. Direct
+  // along the known route, flood while there is none, and always ahead of the
+  // queue: until it lands the peer is still retransmitting.
+  void sendAck(const PublicKey& to, uint32_t value, ByteView extra);
 
   bool hasRoute(const PublicKey& to) const;
   void forgetRoute(const PublicKey& to);

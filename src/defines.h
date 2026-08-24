@@ -64,6 +64,11 @@
 #define MAX_CONTACT_NAME 64
 #define MAX_SECRET_CACHE 256
 
+// How many keys the delegate may offer for one source hash. An envelope carries
+// a single byte of the sender's key, so several people can answer to it; past a
+// handful the packet is almost certainly not ours anyway.
+#define MAX_LOGGED_IN_CANDIDATES 8
+
 // Version 2 keeps what the radio heard — when, how well, how far — beside what
 // the advert claimed. Version 1 files are read and upgraded; the fields they
 // have no room for start empty and fill in with the next packet.
@@ -115,6 +120,12 @@
 
 // REQ plaintext: timestamp(4) type(1) argument(rest).
 #define REQUEST_PREFIX_SIZE 5
+
+// A keep-alive is acknowledged over exactly nine bytes — timestamp, type and
+// the bookmark — whether or not the client sent the bookmark. Shorter is
+// zero-filled to this length before hashing, which is what the firmware does
+// and therefore what the number has to be computed over.
+#define KEEP_ALIVE_ACK_BYTES 9
 
 using ByteView = std::span<const std::uint8_t>;
 using ByteSpan = std::span<std::uint8_t>;

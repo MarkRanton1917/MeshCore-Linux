@@ -41,6 +41,11 @@ static void writeUint32(std::vector<uint8_t>& out, uint32_t value)
     out.push_back((uint8_t)(value >> (8 * i)));
 }
 
+// Defined with the command parser below, needed by the login path above it:
+// both take an argument that is the rest of a buffer and both have to survive a
+// client that padded it.
+static std::string_view trimmed(std::string_view line);
+
 static bool samePublicKey(const PublicKey& a, const PublicKey& b)
 {
   return std::memcmp(a.data.data(), b.data.data(), PACKET_PUBLIC_KEY_SIZE) == 0;
@@ -263,8 +268,12 @@ void Room::onAnon(const PublicKey& from, ByteView plain)
 
   const uint32_t timestamp = readUint32(plain, 0);
   const uint32_t syncSince = readUint32(plain, 4);
-  const std::string_view password((const char*)plain.data() + LOGIN_REQUEST_PREFIX_SIZE,
-    std::min<size_t>(plain.size() - LOGIN_REQUEST_PREFIX_SIZE, MAX_PASSWORD));
+
+  // Trimmed for the same reason the command parser trims: a client that pads
+  // the plaintext to a fixed length sends the padding, and a password with an
+  // invisible NUL on the end never matches again.
+  const std::string_view password = trimmed(std::string_view((const char*)plain.data() + LOGIN_REQUEST_PREFIX_SIZE,
+    std::min<size_t>(plain.size() - LOGIN_REQUEST_PREFIX_SIZE, MAX_PASSWORD)));
 
   Client* client = authenticate(from, password, timestamp);
   if (client == nullptr) return; // replayed or refused, silently
@@ -277,6 +286,17 @@ void Room::onAnon(const PublicKey& from, ByteView plain)
     config_.bus->publish(telemetry::EventType::ClientLogin, serverTime_);
   }
   sendLoginResponse(from, *client);
+}
+
+size_t Room::keysMatching(uint8_t hash, std::span<PublicKey> out)
+{
+  size_t found = 0;
+  for (const Client& client : clients_) {
+    if (found >= out.size()) break;
+    if (client.pk.data[0] != hash) continue;
+    out[found++] = client.pk;
+  }
+  return found;
 }
 
 void Room::sendLoginResponse(const PublicKey& to, const Client& client)
@@ -324,9 +344,11 @@ void Room::onPayload(const identity::Contact& from, packet::PayloadType type, By
 
 // REQ plaintext: timestamp(4) type(1) argument(rest).
 //
-// Answered with a RESPONSE and never acked — the response is the receipt, and
-// on a duty-cycled radio two packets where one will do is a quarter of a second
-// of airtime spent on nothing.
+// Two shapes of answer, and which one depends on the request. A keep-alive is
+// answered with a bare ack carrying the unread count on the end; everything
+// else with a RESPONSE, which is its own receipt. Never both: on a duty-cycled
+// radio a second packet where one will do is a quarter of a second of airtime
+// spent on nothing.
 bool Room::handleRequest(Client& client, ByteView plain)
 {
   if (plain.size() < REQUEST_PREFIX_SIZE) return false;
@@ -346,7 +368,16 @@ bool Room::handleRequest(Client& client, ByteView plain)
     // The client is awake now, so drop the pause a failed delivery imposed
     // rather than making it wait out a timer set for a node that was not there.
     client.retryAfter = 0;
-    sendStatusResponse(client, type);
+
+    // An optional bookmark rides along: a client that has been away asks to be
+    // sent everything since a moment of its choosing. Zero means "no opinion",
+    // which is also what the padding of a shorter request decrypts to, so the
+    // two are deliberately indistinguishable and both mean leave it alone.
+    if (plain.size() >= KEEP_ALIVE_ACK_BYTES) {
+      const uint32_t since = readUint32(plain, REQUEST_PREFIX_SIZE);
+      if (since > 0) client.syncSeq = seqFromTimestamp(since);
+    }
+    sendKeepAliveAck(client, plain);
     return true;
   case RequestType::STATUS:
     sendStatusResponse(client, type);
@@ -354,6 +385,25 @@ bool Room::handleRequest(Client& client, ByteView plain)
   default:
     return false;
   }
+}
+
+// The ack a keep-alive is answered with, and it is not the routing layer's
+// ordinary receipt: the count of what the client has not read yet rides on the
+// end of it, which is how a client that is only polling learns there is
+// something to come back for.
+//
+// Hashed over exactly nine bytes whatever arrived — timestamp, type and the
+// bookmark, zero-filled when the client left the bookmark off. The client
+// computed its number over those same nine, so anything else here is a number
+// nobody is waiting for.
+void Room::sendKeepAliveAck(const Client& client, ByteView plain)
+{
+  std::array<uint8_t, KEEP_ALIVE_ACK_BYTES> hashed {};
+  std::memcpy(hashed.data(), plain.data(), std::min<size_t>(plain.size(), hashed.size()));
+
+  const uint8_t unread = (uint8_t)std::min<size_t>(unreadFor(client), 255);
+  sender_.sendAck(
+    client.pk, protocol::expectedAck(ByteView { hashed.data(), hashed.size() }, client.pk), ByteView { &unread, 1 });
 }
 
 size_t Room::unreadFor(const Client& client) const

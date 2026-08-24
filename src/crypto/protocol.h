@@ -48,9 +48,12 @@ std::optional<Sealed> seal(const SharedSecret& secret, ByteView plaintext, ByteS
 // one foreign packet in 256 lands here, so log at debug and count it, never warn.
 std::optional<size_t> open(const SharedSecret& secret, const Mac& mac, ByteView ciphertext, ByteSpan out);
 
-// Delivery receipt: SHA-256 over the payload and the recipient key, first 4 bytes.
-// The payload must be the ciphertext that went on air, never the plaintext.
+// Delivery receipt: SHA-256 over the plaintext and the sender's key, first 4
+// bytes. The plaintext, not the ciphertext — both ends have to arrive at the
+// same number, and the ciphertext is the one thing the receiver would have to
+// keep around to hash. The sender's key, not the recipient's: whoever sends
+// hashes their own, whoever answers hashes the key of who sent to them.
 // A correlation id, not authentication: anyone who saw the packet can forge it.
-std::uint32_t expectedAck(ByteView payload, const PublicKey& recipient);
+std::uint32_t expectedAck(ByteView plaintext, const PublicKey& sender);
 
 } // namespace crypto::protocol

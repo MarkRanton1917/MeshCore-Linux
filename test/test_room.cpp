@@ -35,6 +35,12 @@ struct Outgoing {
   routing::SendId id = 0;
 };
 
+struct Ack {
+  core::PublicKey to;
+  uint32_t value = 0;
+  std::vector<uint8_t> extra;
+};
+
 class FakeSender : public room::Sender {
 public:
   routing::SendId sendDirect(const core::PublicKey& to,
@@ -60,8 +66,18 @@ public:
     flooded.push_back(std::move(item));
   }
 
+  void sendAck(const core::PublicKey& to, uint32_t value, ByteView extra) override
+  {
+    Ack item;
+    item.to = to;
+    item.value = value;
+    item.extra.assign(extra.begin(), extra.end());
+    acks.push_back(std::move(item));
+  }
+
   std::vector<Outgoing> sent;
   std::vector<Outgoing> flooded;
+  std::vector<Ack> acks;
   routing::SendId nextId = 1;
 };
 
@@ -302,6 +318,17 @@ static void testLogin()
   tiny.resize(3);
   room.onAnon(stranger, ByteView { tiny.data(), tiny.size() });
   that("a truncated login is ignored", room.findClient(stranger) == nullptr);
+
+  // A login is the only place a client's whole key is seen: everything it sends
+  // afterwards is stamped with one byte of it. Routing asks this to close the
+  // gap, and for a client that never advertised there is no other way to know.
+  std::array<core::PublicKey, 4> found {};
+  that("the guest answers to their own hash", room.keysMatching(0x11, std::span<core::PublicKey> { found }) == 1);
+  that("and it is their key", std::memcmp(found[0].data.data(), guest.data.data(), PACKET_PUBLIC_KEY_SIZE) == 0);
+  that("the admin too", room.keysMatching(0x22, std::span<core::PublicKey> { found }) == 1);
+  that("nobody answers for a hash no client has", room.keysMatching(0x99, std::span<core::PublicKey> { found }) == 0);
+  that(
+    "and the refused stranger is not on the list", room.keysMatching(0x33, std::span<core::PublicKey> { found }) == 0);
 }
 
 static void testAnonymousRead()
@@ -715,12 +742,33 @@ static void testRequests()
   room.tick(1100);
   that("held back during the retry pause", sent.empty());
 
+  // Answered with a bare ack and no RESPONSE — that is what the firmware does,
+  // and a client waiting for the ack sends the keep-alive again until it comes.
   auto alive = requestPayload(2001, room::RequestType::KEEP_ALIVE);
   room.onPayload(contactOf(reader), packet::PayloadType::REQ, ByteView { alive.data(), alive.size() });
-  that("the keep-alive is answered", sent.size() == 1);
+  that("the keep-alive is answered with an ack", fixture.sender.acks.size() == 1);
+  that("and with nothing else", sent.empty());
+  that("the ack goes to the client that asked",
+    fixture.sender.acks.size() == 1
+      && std::memcmp(fixture.sender.acks[0].to.data.data(), reader.data.data(), PACKET_PUBLIC_KEY_SIZE) == 0);
+
+  // Hashed over nine bytes whatever arrived: this request carried five, so the
+  // other four are zeroes, and the client hashed the same nine.
+  std::array<uint8_t, KEEP_ALIVE_ACK_BYTES> hashed {};
+  std::memcpy(hashed.data(), alive.data(), std::min<size_t>(alive.size(), hashed.size()));
+  that("over the nine bytes the client hashed",
+    fixture.sender.acks.size() == 1
+      && fixture.sender.acks[0].value
+        == crypto::protocol::expectedAck(ByteView { hashed.data(), hashed.size() }, reader));
+
+  // The unread count rides on the end: both posts are still waiting, since the
+  // push that would have moved the bookmark was the one that failed.
+  that("the unread count rides on the end",
+    fixture.sender.acks.size() == 1 && fixture.sender.acks[0].extra.size() == 1
+      && fixture.sender.acks[0].extra[0] == 2);
 
   room.tick(1200);
-  that("and pushing resumes at once", sent.size() == 2);
+  that("and pushing resumes at once", sent.size() == 1);
 
   auto unknown = requestPayload(2002, (room::RequestType)0x7F);
   sent.clear();

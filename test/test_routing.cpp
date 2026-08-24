@@ -121,6 +121,18 @@ public:
     (void)p;
     return forwarding;
   }
+  // Stands in for the room's client table: keys of people who logged in and may
+  // never have advertised.
+  size_t keysMatching(uint8_t hash, std::span<core::PublicKey> out) override
+  {
+    size_t found = 0;
+    for (const core::PublicKey& pk : loggedIn) {
+      if (found >= out.size()) break;
+      if (pk.data[0] != hash) continue;
+      out[found++] = pk;
+    }
+    return found;
+  }
 
   std::vector<Received> payloads;
   std::vector<Received> groups;
@@ -131,6 +143,7 @@ public:
   std::string anonPlain;
   int anonCount = 0;
   bool forwarding = true;
+  std::vector<core::PublicKey> loggedIn;
 };
 
 struct Node {
@@ -622,6 +635,47 @@ static void testAnonRequest()
   that("a bystander ignores it", other.node(bystander).delegate.anonCount == 0);
 }
 
+// An envelope names its sender with one byte, and resolving that byte used to
+// mean searching the contacts — everybody who has advertised. A client that
+// logs in never has to advertise: its whole key travels inside the login. So
+// the delegate is asked as well, and this is the difference that makes.
+static void testSenderKnownOnlyByLogin()
+{
+  section("routing: a sender known only by login");
+
+  Network net;
+  const size_t client = net.add(), room = net.add();
+  net.link(client, room);
+  // Deliberately no introduceAll: no advert of the client was ever heard.
+
+  const auto first = textPayload("hello");
+  net.node(client).router->sendDirect(
+    net.node(room).store.selfPk(), packet::PayloadType::TXT_MSG, ByteView { first.data(), first.size() }, true);
+  net.run(3000);
+
+  that("a stranger's message lands nowhere", net.node(room).delegate.payloads.empty());
+  that("and it is never acknowledged", net.node(client).delegate.acked.empty());
+
+  // The login the room would have taken puts the key in its client table.
+  net.node(room).delegate.loggedIn.push_back(net.node(client).store.selfPk());
+
+  const auto second = textPayload("hello again");
+  net.node(client).router->sendDirect(
+    net.node(room).store.selfPk(), packet::PayloadType::TXT_MSG, ByteView { second.data(), second.size() }, true);
+  net.run(6000); // run() takes a deadline, not a duration, and 3000 is already gone
+
+  that("now the message arrives", net.node(room).delegate.payloads.size() == 1);
+  that("intact",
+    net.node(room).delegate.payloads.size() == 1
+      && std::memcmp(net.node(room).delegate.payloads[0].plain.data() + TEXT_MSG_PREFIX_SIZE, "hello again", 11) == 0);
+  that("attributed to the right key",
+    net.node(room).delegate.payloads.size() == 1
+      && std::memcmp(net.node(room).delegate.payloads[0].from.data.data(), net.node(client).store.selfPk().data.data(),
+           PACKET_PUBLIC_KEY_SIZE)
+        == 0);
+  that("and the sender stops retrying", net.node(client).delegate.acked.size() == 1);
+}
+
 // Channel traffic is addressed to a key, not to a node. routing holds no
 // channel keys, so it cannot say whether a group message is for this node and
 // does not try: everyone who hears it gets it handed up, and everyone forwards.
@@ -735,6 +789,7 @@ int main()
   testTraceCollectsTheRoute();
   testDuplicateAgesOut();
   testAnonRequest();
+  testSenderKnownOnlyByLogin();
   testGroupDelivery();
   testForwardingPolicy();
   testTransitIsCounted();
